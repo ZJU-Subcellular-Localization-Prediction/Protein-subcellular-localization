@@ -1,0 +1,609 @@
+# CLAUDE.md — CS 同学代码实现计划 & 进度追踪
+
+---
+
+## 项目概况
+
+- **项目名**：蛋白质亚细胞定位预测 Web 应用
+- **当前目录**：`D:\test\Protein-subcellular-localization`
+- **原项目**：`D:\test\Protein-subcellular-localization-main`
+- **环境管理**：Anaconda（conda env）
+- **截止日期**：2026 年 5 月 28 日，剩余 8 天
+- **GPU 状态**：有 GPU（CUDA 12.1）
+- **ESM-2 模型**：`facebook/esm2_t30_150M_UR50D`（640 维嵌入，150M 参数）
+
+---
+
+## 实施总路线（由底向上）
+
+```
+ESM-2 特征提取 → PyTorch 模型重写 → Java 后端 + MySQL → Vue 3 前端 → 联调优化
+```
+
+---
+
+## 关键参考文件（原项目）
+
+| 文件 | 用途 | 重点行号 |
+|------|------|---------|
+| `D:\test\Protein-subcellular-localization-main\utils\models.py` | 全部 7 种 Keras 架构 + Bahdanau Attention + 评估指标 | 12-37（Attention）、73-462（7 种架构）、470-643（评估） |
+| `D:\test\Protein-subcellular-localization-main\utils\datasetOnehot.py` | DeepLoc.rtf 解析 + 标签字典 + 序列处理 + 4-fold 划分 | 19-59（标签字典）、85-165（序列处理+划分） |
+| `D:\test\Protein-subcellular-localization-main\trainings\rs_cnn_lstm_attention_complete.py` | 超参数空间 + 训练流程（Talos） | 29-57（超参数+训练） |
+| `D:\test\Protein-subcellular-localization-main\dataset\DeepLoc\DeepLoc.rtf` | 原始数据集（FASTA 格式） | — |
+
+---
+
+## 标签映射速查
+
+### 10 类亚细胞定位（location）
+
+```python
+labels_dic_location = {
+    'Cell.membrane': 0, 'Cytoplasm': 1, 'Endoplasmic.reticulum': 2,
+    'Golgi.apparatus': 3, 'Lysosome/Vacuole': 4, 'Mitochondrion': 5,
+    'Nucleus': 6, 'Peroxisome': 7, 'Plastid': 8, 'Extracellular': 9
+}
+```
+
+### 3 类膜结合状态（membrane）
+
+```python
+labels_dic_membrane = {'M': 0, 'S': 1, 'U': 2}
+```
+
+### 20 种标准氨基酸
+
+```python
+amino_acid_alphabet = {
+    'A':0, 'C':1, 'D':2, 'E':3, 'F':4, 'G':5, 'H':6, 'I':7, 'K':8,
+    'L':9, 'M':10, 'N':11, 'P':12, 'Q':13, 'R':14, 'S':15, 'T':16,
+    'V':17, 'W':18, 'Y':19
+}
+```
+
+---
+
+## 序列处理核心逻辑（摘自 datasetOnehot.py）
+
+### 中心截断 + 末端 padding
+
+```
+# 如果序列长度 > seq_len：从中心删除氨基酸（保护 N 端和 C 端信号）
+# 如果序列长度 < seq_len：在末尾补零
+# 未知氨基酸也补零
+
+extra = len(sequence) - sequence_len
+if extra >= 0:     # 太长 → 从中心截断
+    index_i = floor(len/2) - floor(extra/2)
+    index_f = floor(len/2) + ceil(extra/2)
+else:              # 太短 → 末端 padding
+    index_i = index_f = floor(len/2)
+    extra = -extra  # padding 数量
+```
+
+### 4-fold 划分逻辑
+
+```
+part % 4 == 1 → 验证集
+part % 4 != 1 → 训练集
+加上 [test] 标记的 → 测试集
+跳过 "Cytoplasm-Nucleus" 类别
+```
+
+---
+
+## ESM-2 调用速查
+
+```python
+from transformers import AutoTokenizer, AutoModel
+import torch
+
+MODEL_NAME = "facebook/esm2_t30_150M_UR50D"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModel.from_pretrained(MODEL_NAME)
+model.eval()
+model.to('cuda')
+
+sequence = "MALWMRLLPLLALL..."
+inputs = tokenizer(sequence, return_tensors="pt")
+inputs = {k: v.to('cuda') for k, v in inputs.items()}
+
+with torch.no_grad():
+    outputs = model(**inputs)
+    # 去掉 BOS（index 0）和 EOS（index -1）
+    embeddings = outputs.last_hidden_state[:, 1:-1, :]
+    # shape: (1, seq_len, 640)
+```
+
+**ESM-2 模型选型表**：
+
+| 模型 | 参数量 | 嵌入维度 | 适用环境 |
+|------|--------|---------|---------|
+| `esm2_t6_8M_UR50D` | 8M | 320 | CPU 快速原型 |
+| `esm2_t12_35M_UR50D` | 35M | 480 | CPU 平衡选择 |
+| `esm2_t30_150M_UR50D` | 150M | 640 | **GPU 推荐** |
+| `esm2_t33_650M_UR50D` | 650M | 1280 | 大显存 GPU |
+
+**文档**：https://huggingface.co/docs/transformers/model_doc/esm
+
+---
+
+## Bahdanau Attention 核心公式（摘自 models.py 第 12-37 行）
+
+```
+score = V * tanh(W1 * features + W2 * hidden)
+attention_weights = softmax(score, axis=time)
+context_vector = sum(attention_weights * features, axis=time)
+```
+
+- `W1`（Dense）：作用于 encoder 所有 hidden states
+- `W2`（Dense）：作用于 decoder 最后 hidden state（扩展 time axis 后相加）
+- `V`（Dense → 1）：计算标量 score
+- 输出：`(context_vector, attention_weights)`
+
+---
+
+## 完整版模型架构（create_CNN_LSTM_Attention_complete，第 383-462 行）
+
+```
+Input (seq_len, n_feat)
+  → Dropout(drop_prob)
+  → Permute to (n_feat, seq_len)   [channels_first]
+  → 6 并行 Conv1d(kernel=1,3,5,9,15,21, 各 n_filt filters, Orthogonal init, ReLU)
+  → Concat(axis=1) → (6*n_filt, seq_len)
+  → Permute to (seq_len, 6*n_filt) [channels_last]
+  → Conv1d(kernel=3, 128 filters, ReLU)
+  → BiLSTM(n_hid, return_sequences=True, return_state=True, dropout=drop_hid)
+  → Concat(forward_h, backward_h) → state_h
+  → Attention(n_hid*2)(l_lstm, state_h) → context_vector
+  → Dropout(drop_hid)
+  → Dense(n_hid*2, ReLU, Orthogonal init)
+  → Dropout(drop_hid)
+  → Dense(n_class, Softmax, Orthogonal init)
+```
+
+**PyTorch 移植注意点**：
+
+| Keras | PyTorch |
+|-------|---------|
+| `data_format='channels_first'` | Conv1d 默认 `(N, C, L)`，无需特殊处理 |
+| `Orthogonal(gain=sqrt(2))` | `nn.init.orthogonal_(tensor, gain=math.sqrt(2))` |
+| `clipnorm=3, clipvalue=2` | `torch.nn.utils.clip_grad_norm_(model.parameters(), 3)` |
+| `layers[12].initial_states` | 自定义 LSTM `h0, c0` 为 `nn.Parameter` |
+
+---
+
+## 超参数搜索空间（摘自 rs_cnn_lstm_attention_complete.py 第 29-36 行）
+
+```python
+p = {
+    'batch_size': (32, 256, 32),   # 32~256 step 32
+    'lr': [0.0001, 0.0005, 0.001, 0.0015, 0.0020, 0.0025, 0.0030, 0.0035, 0.004, 0.005, 0.007],
+    'n_filt': (5, 50, 5),          # 5~50 step 5
+    'n_hid': (5, 100, 5),          # 5~100 step 5
+    'drop_prob': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+    'drop_hid': [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+}
+```
+
+---
+
+## 数据库 DDL
+
+```sql
+CREATE DATABASE protein_localization;
+USE protein_localization;
+
+CREATE TABLE sequences (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    sequence_id VARCHAR(64) UNIQUE NOT NULL,
+    raw_sequence TEXT NOT NULL,
+    sequence_length INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE predictions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    sequence_id VARCHAR(64) NOT NULL,
+    predicted_location VARCHAR(64) NOT NULL,
+    location_confidence DOUBLE NOT NULL,
+    predicted_membrane VARCHAR(32),
+    membrane_confidence DOUBLE,
+    all_probabilities JSON,
+    attention_data JSON,
+    model_version VARCHAR(32) DEFAULT 'v1',
+    inference_time_ms INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (sequence_id) REFERENCES sequences(sequence_id)
+);
+```
+
+---
+
+## API 接口规范
+
+### POST /api/predict
+
+请求：
+```json
+{"sequence": "MALWMRLLPLLALLALWGPDPAAAFVNQHLCGSHL..."}
+```
+
+响应：
+```json
+{
+  "code": 200,
+  "data": {
+    "sequence_id": "abc123",
+    "predicted_location": "Extracellular",
+    "location_confidence": 0.923,
+    "predicted_membrane": "Soluble",
+    "membrane_confidence": 0.871,
+    "all_probabilities": {
+      "Cell membrane": 0.012, "Cytoplasm": 0.008, "ER": 0.015,
+      "Golgi apparatus": 0.003, "Lysosome + Vacuole": 0.005,
+      "Mitochondrion": 0.018, "Nucleus": 0.003,
+      "Peroxisome": 0.002, "Plastid": 0.001, "Extracellular": 0.923
+    },
+    "attention_weights": [[0.001, 0.003, ...]],
+    "model_version": "v1",
+    "inference_time_ms": 1523
+  }
+}
+```
+
+### GET /api/history?page=1&size=20
+
+响应：
+```json
+{
+  "code": 200,
+  "data": {
+    "total": 156, "page": 1, "size": 20,
+    "records": [{
+      "id": 1, "sequence_id": "abc123",
+      "predicted_location": "Extracellular",
+      "location_confidence": 0.923,
+      "predicted_membrane": "Soluble",
+      "created_at": "2026-05-20 14:30:00"
+    }]
+  }
+}
+```
+
+---
+
+## Vue 组件树 & 路由
+
+```
+App.vue
+├── Home.vue          (/)              — 项目介绍 + 技术架构
+├── Predict.vue       (/predict)       — 核心预测页
+│   ├── SequenceInput.vue              — 序列输入（文本框 + 上传 + 示例）
+│   ├── ResultCard.vue                 — 预测结果卡片
+│   ├── CellDiagram.vue                — SVG 细胞结构图（动态高亮）
+│   ├── ProbabilityChart.vue           — ECharts 概率分布柱状图
+│   └── AttentionHeatmap.vue           — Attention 权重热力图
+├── History.vue       (/history)       — 历史记录
+│   └── HistoryTable.vue               — el-table + el-pagination
+└── About.vue         (/about)         — 团队 + 技术栈
+```
+
+---
+
+## 进度追踪
+
+### Phase 0：项目初始化
+
+- [x] 创建项目目录 `D:\test\Protein-subcellular-localization`
+- [x] 创建 CLAUDE.md（本文件）、README.md
+- [x] 创建子目录结构（python/models/, python/data/, backend/, frontend/, docs/）
+- [x] 创建 python/requirements.txt、python/environment.yml
+
+### Phase 1：ESM-2 特征提取（预计 Day 1-2，约 12h 工时）
+
+- [ ] **Step 1.1** — 创建 Anaconda 环境并安装依赖
+  ```bash
+  conda create -n protein-local python=3.10 -y
+  conda activate protein-local
+  conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia -y
+  conda install numpy scikit-learn matplotlib pandas -y
+  pip install transformers biopython
+  ```
+  验证：`python -c "import torch; print(torch.cuda.is_available())"` 输出 True
+
+- [ ] **Step 1.2** — 解析 DeepLoc.rtf 格式
+  - 用 BioPython `SeqIO.parse` 读取
+  - 每行格式：`>ID Location-Membrane [test]`
+  - 示例：`>Q9H400 Cell.membrane-M test` → location=Cell.membrane(0), membrane=M(0), is_test=true
+  - 跳过 `Cytoplasm-Nucleus` 类别
+  - 序列最后一个字符是占位符 `/`，需去除
+
+- [ ] **Step 1.3** — 编写 `python/extract_features.py`
+  - 加载 ESM-2 模型到 GPU
+  - 批量处理序列（建议 batch_size=8~16，GPU 环境）
+  - 对每条序列：
+    1. ESM-2 tokenize + 推理
+    2. 取 `last_hidden_state[:, 1:-1, :]`（去掉 BOS/EOS）
+    3. 中心截断/末端 padding 到 1000 length
+  - 按 4-fold 逻辑划分 train/val/test
+  - 保存为 `dataset_esm2_1000.pt`（torch.save）
+
+- [ ] **Step 1.4** — 验证数据
+  - `X_train.shape` = `(n_samples, 1000, 640)`
+  - `y_train_location.shape` = `(n_samples,)`，值域 0~9
+  - `y_train_membrane.shape` = `(n_samples,)`，值域 0~2
+  - train/val/test 三者无重叠
+
+> **阻塞点**：ESM-2 模型下载（~600MB，需稳定网络） + GPU 推理速度（150M 参数模型对约 8000 条序列的推理时间约 1-2 小时）
+
+### Phase 2：PyTorch 模型重写（预计 Day 2-3，约 16h 工时）
+
+- [ ] **Step 2.1** — 实现 Bahdanau Attention 层
+  文件：`python/models/attention.py`
+  ```python
+  class BahdanauAttention(nn.Module):
+      def __init__(self, units):
+          super().__init__()
+          self.W1 = nn.Linear(units, units)    # 作用于 encoder states
+          self.W2 = nn.Linear(units, units)    # 作用于 decoder hidden
+          self.V = nn.Linear(units, 1)         # 计算标量 score
+
+      def forward(self, features, hidden):
+          # features: (batch, seq_len, units) — encoder 所有 hidden states
+          # hidden:   (batch, units)         — decoder 最后 hidden state
+          hidden_expanded = hidden.unsqueeze(1)  # (batch, 1, units)
+          score = self.V(torch.tanh(self.W1(features) + self.W2(hidden_expanded)))
+          attention_weights = F.softmax(score, dim=1)  # (batch, seq_len, 1)
+          context_vector = torch.sum(attention_weights * features, dim=1)
+          return context_vector, attention_weights
+  ```
+  验证：输入 `(2, 1000, 64)` 的 features + `(2, 64)` 的 hidden → 输出 context `(2, 64)` + weights `(2, 1000, 1)`
+
+> **阻塞点**：Attention 维度对齐 — `W1(features)` 和 `W2(hidden_expanded)` 需要 broadcast 后相加
+
+- [ ] **Step 2.2** — 实现 7 种对比架构
+  文件：`python/models/architectures.py`
+
+  所有架构的基类：
+  ```python
+  class BaseModel(nn.Module):
+      def __init__(self, seq_len, n_feat, n_hid, n_class, drop_prob, n_filt=None, drop_hid=None, n_membrane_class=3):
+          ...
+  ```
+
+  | # | 方法 | 双输出 | 关键结构 |
+  |---|------|--------|---------|
+  | 1 | `FFN` | 是(loc+membrane) | Flatten → Dense(n_hid) → Dropout → 2×Dense(softmax) |
+  | 2 | `CNN` | 是 | Conv1d(3)+Conv1d(5)→Concat→Conv1d(3)→MaxPool(5)→Dense |
+  | 3 | `BLSTM` | 是 | LSTM(forward)+LSTM(backward)→Concat(2*n_hid)→Dense |
+  | 4 | `CNN_BLSTM` | 是 | CNN → BiLSTM(return_sequences=False) → Dense |
+  | 5 | `BLSTM_Attention` | 是 | BiLSTM(return_sequences=True) → Attention → Dense |
+  | 6 | `CNN_BLSTM_Attention` | 是 | CNN → BiLSTM(return_seq=True) → Attention → Dense |
+  | 7 | `CNN_BLSTM_Attention_complete` | 否(仅loc) | Input Dropout → 6 parallel Conv1d(1,3,5,9,15,21) → Concat → Conv1d(128,3) → BiLSTM → Attention → Dense(Orthogonal init) → 2×Dropout → Softmax |
+
+  **移植注意点（逐一对照）**：
+  1. Keras `Permute((2,1))` → PyTorch `tensor.permute(0, 2, 1)` 或直接保持 `(N,C,L)` 格式
+  2. Keras `Conv1D(filters, kernel, data_format='channels_first')` → PyTorch `nn.Conv1d(in_channels, out_channels, kernel, padding='same')`
+  3. Keras `Bidirectional(LSTM(...))` → PyTorch `nn.LSTM(..., bidirectional=True)`
+  4. Keras 的完整版 LSTM 有 `return_state=True` → PyTorch LSTM 默认返回 `(output, (h_n, c_n))`
+  5. 完整版无 membrane 输出（单 head），其余 6 种有双输出
+  6. 完整版的 `layers[12].initial_states` → 在 PyTorch 中通过自定义 `h0/c0` 实现
+
+- [ ] **Step 2.3** — 编写 PyTorch Dataset
+  文件：`python/data/dataset.py`
+  ```python
+  class ProteinDataset(torch.utils.data.Dataset):
+      def __init__(self, X, y_location, y_membrane=None):
+          self.X = torch.FloatTensor(X)
+          self.y_location = torch.LongTensor(y_location)
+          self.y_membrane = torch.LongTensor(y_membrane) if y_membrane is not None else None
+
+      def __len__(self): return len(self.X)
+
+      def __getitem__(self, idx):
+          if self.y_membrane is not None:
+              return self.X[idx], self.y_location[idx], self.y_membrane[idx]
+          return self.X[idx], self.y_location[idx]
+  ```
+
+- [ ] **Step 2.4** — 编写训练脚本 `python/train.py`
+  - 命令行参数：`--model`（选择架构）、`--data`（数据集路径）、`--epochs`、`--batch_size`、`--lr`
+  - 训练循环：
+    - Adam optimizer（lr 可配）
+    - 双输出模型：loss = CrossEntropyLoss(loc) + CrossEntropyLoss(membrane)
+    - 单输出模型（complete）：loss = CrossEntropyLoss(loc)
+    - 梯度裁剪：`clip_grad_norm_(max_norm=3)`
+    - Early stopping：patience=20，监控 val_loss
+    - Model checkpoint：保存 val_loss 最低的 `best_model.pt`
+  - 每个 epoch 记录：train_loss, train_acc, val_loss, val_acc
+  - 训练结束后保存 loss/acc 曲线图
+
+- [ ] **Step 2.5** — 评估指标
+  - Gorodkin（多类 MCC）：`sklearn.metrics.matthews_corrcoef(y_true_loc, y_pred_loc)`
+  - MCC（膜分类）：`sklearn.metrics.matthews_corrcoef(y_true_mem, y_pred_mem)`
+  - 混淆矩阵：`sklearn.metrics.confusion_matrix` + matplotlib 热力图
+  - print_measures：一行输出所有指标（仿照原项目 `models.py` 第 626-642 行）
+
+> **阻塞点**：完整版 6 并行 Conv 层参数量 + GPU 显存管理。建议先用 `esm2_t12_35M`（480 维）快速跑通，再换 `esm2_t30_150M`（640 维）做最终训练。
+
+### Phase 3：Java 后端 + MySQL（预计 Day 3-4，约 12h 工时）
+
+- [ ] **Step 3.1** — Spring Boot 项目初始化
+  - 使用 Spring Initializr 或手动创建 Maven 项目
+  - 依赖：spring-boot-starter-web, mybatis-plus-boot-starter, mysql-connector-j
+  - 配置 `application.properties`：数据库连接、端口 8080
+
+- [ ] **Step 3.2** — MySQL 建表 + 基础 CRUD
+  - 运行 DDL（上方的 CREATE TABLE）
+  - 创建 Entity + Mapper（MyBatis-Plus）
+  - 创建 Service 层
+
+- [ ] **Step 3.3** — 实现 API Controller
+  ```java
+  @RestController
+  @RequestMapping("/api")
+  public class PredictController {
+      @PostMapping("/predict")       // → PredictService.predict(sequence)
+      @GetMapping("/history")        // → PredictService.getHistory(page, size)
+      @GetMapping("/history/{id}")   // → PredictService.getById(id)
+  }
+  ```
+
+- [ ] **Step 3.4** — 实现 PredictService（核心）
+  1. 生成 `sequence_id`（MD5 前 8 位或 UUID）
+  2. 保存 `sequences` 表
+  3. `ProcessBuilder("python", "python/predict.py", "--sequence", sequence)` 调用推理脚本
+  4. 设置超时 60s
+  5. 解析 stdout JSON
+  6. 保存 `predictions` 表
+  7. 返回 JSON 响应
+
+- [ ] **Step 3.5** — 编写 `python/predict.py`（推理脚本）
+  - 加载 ESM-2 模型 + 训练好的 PyTorch 模型（*启动时加载一次，避免每次推理都重新加载*）
+  - 或使用简易模式：每次加载（通过 `--sequence` 参数）
+  - 输出 JSON 到 stdout（`print(json.dumps(result))`）
+  - Java 端读取 stdout 行
+
+> **阻塞点**：Java ProcessBuilder 调用 Python 的路径问题（需确保 conda 环境激活且 Python 路径正确）。建议写一个 shell 脚本 `predict.sh`，Java 调用该脚本。
+
+### Phase 4：Vue 3 + Element Plus 前端（预计 Day 4-6，约 16h 工时）
+
+- [ ] **Step 4.1** — 项目初始化
+  ```bash
+  npm create vue@latest frontend
+  cd frontend
+  npm install element-plus @element-plus/icons-vue echarts vue-echarts axios vue-router
+  ```
+  配置 `vite.config.js`：proxy `/api` → `http://localhost:8080`
+
+- [ ] **Step 4.2** — 路由 + 布局
+  - `router/index.js`：4 个路由
+  - `App.vue`：el-container 布局（header + main + footer）
+  - 全局引入 Element Plus
+
+- [ ] **Step 4.3** — 组件实现（按顺序）
+
+  1. **SequenceInput.vue**
+     - el-input（textarea）+ el-upload（.fasta 文件）+ el-button（示例填充）
+     - 校验：非空、仅允许 20 种氨基酸字符
+     - Emit：`@submit`
+
+  2. **ResultCard.vue**
+     - Props：`location`, `confidence`, `membrane`, `membraneConfidence`
+     - 展示：el-card + el-tag（类别名）+ el-progress（置信度百分比）
+
+  3. **ProbabilityChart.vue**
+     - Props：`probabilities`（10 个值的对象）
+     - 使用 vue-echarts 绘制横向柱状图
+     - 10 种颜色对应 10 个类别
+
+  4. **CellDiagram.vue**（重点）
+     - Props：`highlightLocation`
+     - 使用 SVG 绘制简化细胞结构图
+     - 9 个细胞器区域可高亮（默认灰色，高亮时发脉冲光 + 对应类别颜色）
+     - 底部标注细胞器中英文名
+
+  5. **AttentionHeatmap.vue**
+     - Props：`attentionWeights`（二维数组）
+     - 使用 Canvas 或 ECharts heatmap 绘制
+     - X 轴：序列位置；Y 轴：attention weight 强度
+
+  6. **HistoryTable.vue**
+     - el-table + el-pagination
+     - 列：序列 ID、预测位置、置信度、时间
+     - el-input 搜索 + 分页
+
+- [ ] **Step 4.4** — API 层封装
+  - `api/index.js`：axios 实例（baseURL + 拦截器）
+  - `api/predict.js`：`postPredict(sequence)`、`getHistory(page, size)`、`getHistoryById(id)`
+
+> **阻塞点**：CellDiagram.vue 的 SVG 绘制 + 动画效果。如果 SVG 太复杂，可改用一张静态细胞图 + 在对应位置叠加 CSS 高亮圆点标注。
+
+### Phase 5：联调测试（预计 Day 6-7，约 8h 工时）
+
+- [ ] **Step 5.1** — 全链路测试
+  1. 启动 Java 后端 → `http://localhost:8080/api/predict` 可用
+  2. 启动 Vue 前端 → `http://localhost:5173` 可访问
+  3. 输入序列 → 点击提交 → 后端调用 Python → 返回 JSON → 前端展示
+
+- [ ] **Step 5.2** — 边界情况
+  - 空输入 → 前端提示"请输入蛋白质序列"
+  - 非氨基酸字符（如数字）→ 前端警告 + 后端自动清洗
+  - 超长序列（>2000aa）→ 自动截断 + 前端提示
+  - Python 推理超时（>60s）→ 后端返回 504 + 前端提示"推理超时，请稍后重试"
+
+- [ ] **Step 5.3** — 性能优化
+  - Python `predict.py` 改为常驻进程（Flask 微服务）或模型预加载
+  - 前端 loading 分阶段展示进度
+
+---
+
+## 验证 CheckList
+
+- [ ] `conda activate protein-local && python -c "import torch; print(torch.cuda.is_available())"` → True
+- [ ] `python extract_features.py` 可运行，生成 `dataset_esm2_1000.pt`
+- [ ] `X_train.shape` = `(N, 1000, 640)`，标签形状正确
+- [ ] `python models/attention.py` 单元测试通过
+- [ ] 7 种架构 `model.forward(x)` 均不报错
+- [ ] `python train.py --model FFN --epochs 5` 跑通，loss 下降
+- [ ] `python train.py --model CNN_BLSTM_Attention --epochs 60` 完成训练
+- [ ] Gorodkin 值 > 0.6（与原项目趋势一致）
+- [ ] MySQL 建表成功，Spring Boot 启动成功
+- [ ] `POST /api/predict` 返回正确 JSON
+- [ ] Vue 前端 4 个页面可渲染，组件正常交互
+- [ ] 完整链路：输入序列 → 加载动画 → 预测结果 → 细胞图高亮 → 概率图 → 热力图 → 历史记录
+
+---
+
+## 目录结构
+
+```
+Protein-subcellular-localization/
+├── CLAUDE.md                    # 本文件（计划 + 进度）
+├── README.md                    # 项目说明
+├── python/
+│   ├── environment.yml          # conda 环境
+│   ├── requirements.txt         # pip 依赖
+│   ├── extract_features.py      # Phase 1 产出：ESM-2 特征提取
+│   ├── train.py                 # Phase 2 产出：训练脚本
+│   ├── predict.py               # Phase 3 产出：推理脚本（供 Java 调用）
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── attention.py         # Bahdanau Attention (nn.Module)
+│   │   ├── architectures.py     # 7 种对比架构
+│   │   └── complete.py          # 最终完整版模型
+│   └── data/
+│       ├── __init__.py
+│       └── dataset.py           # PyTorch Dataset + DataLoader
+├── backend/
+│   ├── src/main/java/...
+│   ├── src/main/resources/application.properties
+│   ├── pom.xml
+│   └── sql/
+│       └── init.sql             # 建表 DDL
+├── frontend/
+│   ├── src/
+│   │   ├── views/               # Home, Predict, History, About
+│   │   ├── components/          # SequenceInput, ResultCard, CellDiagram, ProbabilityChart, AttentionHeatmap, HistoryTable
+│   │   ├── router/index.js
+│   │   ├── api/                 # axios 封装
+│   │   └── App.vue
+│   ├── package.json
+│   └── vite.config.js
+└── docs/
+    └── 小组分工计划书.md
+```
+
+---
+
+## 文档参考
+
+- ESM-2 HuggingFace：https://huggingface.co/docs/transformers/model_doc/esm
+- ESM-2 t30 模型页：https://huggingface.co/facebook/esm2_t30_150M_UR50D
+- PyTorch 文档：https://pytorch.org/docs/stable/
+- BioPython SeqIO：https://biopython.org/docs/latest/api/Bio.SeqIO.html
+- Spring Boot 快速开始：https://spring.io/quickstart
+- Element Plus：https://element-plus.org/zh-CN/component/overview.html
+- Vue 3：https://cn.vuejs.org/guide/introduction.html
+- ECharts + vue-echarts：https://github.com/ecomfe/vue-echarts

@@ -1,0 +1,82 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+
+# Conda / Anaconda
+.python-version
+*.conda
+
+# PyTorch
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Matplotlib
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+# ===== Java / Spring Boot / Maven =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+*.log
+*.tmp
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.properties
+
+# ===== Node / Vue 3 / Vite =====
+node_modules/
+dist/
+.vite/
+*.local
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# ===== IDE / Editor =====
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-*
+
+# ===== OS =====
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.lnk
+
+# ===== Data / Runtime =====
+*.sqlite
+*.sqlite3
+*.db
+logs/
+temp/
+tmp/
