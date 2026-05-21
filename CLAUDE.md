@@ -302,38 +302,31 @@ App.vue
 
 ### Phase 1：ESM-2 特征提取（预计 Day 1-2，约 12h 工时）
 
-- [ ] **Step 1.1** — 创建 Anaconda 环境并安装依赖
-  ```bash
-  conda create -n protein-local python=3.10 -y
-  conda activate protein-local
-  conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia -y
-  conda install numpy scikit-learn matplotlib pandas -y
-  pip install transformers biopython
-  ```
-  验证：`python -c "import torch; print(torch.cuda.is_available())"` 输出 True
+- [x] **Step 1.1** — 创建 Anaconda 环境并安装依赖 ✅
+  - 环境名 `protein-local`，Python 3.10
+  - PyTorch 2.5.1 + CUDA 12.1（GPU: RTX 4060 Laptop）
+  - transformers 5.8.1 + biopython 1.87
+  - numpy 2.0.1（conda 安装），scikit-learn + matplotlib + pandas 已安装
 
-- [ ] **Step 1.2** — 解析 DeepLoc.rtf 格式
-  - 用 BioPython `SeqIO.parse` 读取
-  - 每行格式：`>ID Location-Membrane [test]`
-  - 示例：`>Q9H400 Cell.membrane-M test` → location=Cell.membrane(0), membrane=M(0), is_test=true
-  - 跳过 `Cytoplasm-Nucleus` 类别
-  - 序列最后一个字符是占位符 `/`，需去除
+- [x] **Step 1.2** — 解析 DeepLoc.rtf 格式 ✅
+  - 源文件是 RTF (Rich Text Format) 包裹的 FASTA，需用 `SeqIO.parse(file, 'fasta-pearson')`
+  - 每条序列末尾有 RTF 换行符 `\`，需 `rstrip('\\')` 去除
+  - 格式：`>ID Location-Membrane [test]` → 解析出 location, membrane, is_test
+  - 跳过 `Cytoplasm-Nucleus` 类别（146条），共 13858 条有效序列
+  - 4-fold 划分：part%4==1→val, part%4∈{2,3,4}→train, [test]→test
 
-- [ ] **Step 1.3** — 编写 `python/extract_features.py`
-  - 加载 ESM-2 模型到 GPU
-  - 批量处理序列（建议 batch_size=8~16，GPU 环境）
-  - 对每条序列：
-    1. ESM-2 tokenize + 推理
-    2. 取 `last_hidden_state[:, 1:-1, :]`（去掉 BOS/EOS）
-    3. 中心截断/末端 padding 到 1000 length
-  - 按 4-fold 逻辑划分 train/val/test
-  - 保存为 `dataset_esm2_1000.pt`（torch.save）
+- [x] **Step 1.3** — 编写 `python/extract_features.py` ✅（文件级存储架构）
+  - **架构决策**：16GB 内存无法容纳 13858×1000×640 float32 全量特征（~35GB）
+  - **方案**：每条序列的 ESM-2 embedding 存为独立 .pt 文件 + manifest 索引
+  - 输出结构：`data/features/{train,val,test}/XXXXX.pt` + `manifest.pt`
+  - 每条 .pt 存储 (seq_len_raw, 640) float16，约 0.5-1.2 MB/条
+  - Phase 2 训练时 Dataset 按需从磁盘加载，DataLoader workers 并行 I/O
 
-- [ ] **Step 1.4** — 验证数据
-  - `X_train.shape` = `(n_samples, 1000, 640)`
-  - `y_train_location.shape` = `(n_samples,)`，值域 0~9
-  - `y_train_membrane.shape` = `(n_samples,)`，值域 0~2
-  - train/val/test 三者无重叠
+- [x] **Step 1.4** — 验证数据 ✅
+  - `data/features/` 下 train(8313) / val(2772) / test(2773) 三个子目录，共 13858 个 .pt 文件
+  - 单文件格式：`(seq_len_raw, 640)` float16，平均大小 ~625 KB
+  - `manifest.pt` 包含完整 splits、labels、元信息
+  - train/val/test 索引无重叠
 
 > **阻塞点**：ESM-2 模型下载（~600MB，需稳定网络） + GPU 推理速度（150M 参数模型对约 8000 条序列的推理时间约 1-2 小时）
 
@@ -390,22 +383,30 @@ App.vue
   5. 完整版无 membrane 输出（单 head），其余 6 种有双输出
   6. 完整版的 `layers[12].initial_states` → 在 PyTorch 中通过自定义 `h0/c0` 实现
 
-- [ ] **Step 2.3** — 编写 PyTorch Dataset
+- [ ] **Step 2.3** — 编写 PyTorch Dataset（文件级按需加载）
   文件：`python/data/dataset.py`
   ```python
   class ProteinDataset(torch.utils.data.Dataset):
-      def __init__(self, X, y_location, y_membrane=None):
-          self.X = torch.FloatTensor(X)
-          self.y_location = torch.LongTensor(y_location)
-          self.y_membrane = torch.LongTensor(y_membrane) if y_membrane is not None else None
+      def __init__(self, manifest_entries, features_dir, seq_len):
+          # manifest_entries: list of {'file': ..., 'y_location': ..., ...}
+          # 不预加载数据，仅保存索引和标签
+          self.entries = manifest_entries
+          self.features_dir = features_dir
+          self.seq_len = seq_len
 
-      def __len__(self): return len(self.X)
+      def __len__(self): return len(self.entries)
 
       def __getitem__(self, idx):
-          if self.y_membrane is not None:
-              return self.X[idx], self.y_location[idx], self.y_membrane[idx]
-          return self.X[idx], self.y_location[idx]
+          entry = self.entries[idx]
+          # 按需从磁盘加载单条 .pt
+          emb = torch.load(os.path.join(self.features_dir, entry['file']))
+          # 动态 padding 到固定长度
+          actual_len = min(emb.shape[0], self.seq_len)
+          X = torch.zeros(self.seq_len, 640, dtype=torch.float32)
+          X[:actual_len, :] = emb[:actual_len, :].float()
+          return X, entry['y_location'], entry['y_membrane']
   ```
+  DataLoader 使用 `num_workers=4` 并行 I/O 加载。
 
 - [ ] **Step 2.4** — 编写训练脚本 `python/train.py`
   - 命令行参数：`--model`（选择架构）、`--data`（数据集路径）、`--epochs`、`--batch_size`、`--lr`
@@ -575,7 +576,12 @@ Protein-subcellular-localization/
 │   │   └── complete.py          # 最终完整版模型
 │   └── data/
 │       ├── __init__.py
-│       └── dataset.py           # PyTorch Dataset + DataLoader
+│       ├── dataset.py           # PyTorch Dataset（文件级按需加载 + 动态 padding）
+│       └── features/            # Phase 1 产出：独立 .pt 文件
+│           ├── train/00000.pt ...
+│           ├── val/00000.pt ...
+│           ├── test/00000.pt ...
+│           └── manifest.pt      # 索引 + labels + 元信息
 ├── backend/
 │   ├── src/main/java/...
 │   ├── src/main/resources/application.properties
