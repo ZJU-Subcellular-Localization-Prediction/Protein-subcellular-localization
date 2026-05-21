@@ -332,81 +332,29 @@ App.vue
 
 ### Phase 2：PyTorch 模型重写（预计 Day 2-3，约 16h 工时）
 
-- [ ] **Step 2.1** — 实现 Bahdanau Attention 层
+- [x] **Step 2.1** — 实现 Bahdanau Attention 层 ✅
   文件：`python/models/attention.py`
-  ```python
-  class BahdanauAttention(nn.Module):
-      def __init__(self, units):
-          super().__init__()
-          self.W1 = nn.Linear(units, units)    # 作用于 encoder states
-          self.W2 = nn.Linear(units, units)    # 作用于 decoder hidden
-          self.V = nn.Linear(units, 1)         # 计算标量 score
+  实现完成：`BahdanauAttention(nn.Module)` 含 W1/W2/V 三个 Linear 层 + `forward(features, hidden)`。
+  单元测试通过：输入 `(2, 1000, 128)` features + `(2, 128)` hidden → context `(2, 128)` + weights `(2, 1000, 1)`，softmax sum=1 ✓
 
-      def forward(self, features, hidden):
-          # features: (batch, seq_len, units) — encoder 所有 hidden states
-          # hidden:   (batch, units)         — decoder 最后 hidden state
-          hidden_expanded = hidden.unsqueeze(1)  # (batch, 1, units)
-          score = self.V(torch.tanh(self.W1(features) + self.W2(hidden_expanded)))
-          attention_weights = F.softmax(score, dim=1)  # (batch, seq_len, 1)
-          context_vector = torch.sum(attention_weights * features, dim=1)
-          return context_vector, attention_weights
-  ```
-  验证：输入 `(2, 1000, 64)` 的 features + `(2, 64)` 的 hidden → 输出 context `(2, 64)` + weights `(2, 1000, 1)`
-
-> **阻塞点**：Attention 维度对齐 — `W1(features)` 和 `W2(hidden_expanded)` 需要 broadcast 后相加
-
-- [ ] **Step 2.2** — 实现 7 种对比架构
+- [x] **Step 2.2** — 实现 7 种对比架构 ✅
   文件：`python/models/architectures.py`
+  所有 7 种架构已实现为独立的 `nn.Module` 子类：
+  | # | 类名 | 双输出 | 参数 |
+  |---|------|--------|------|
+  | 1 | `FFN` | 是 | seq_len, n_feat, n_hid, n_class, drop_prob |
+  | 2 | `CNN` | 是 | + n_filt |
+  | 3 | `BLSTM` | 是 | seq_len, n_feat, n_hid, n_class, drop_prob |
+  | 4 | `CNN_BLSTM` | 是 | + n_filt |
+  | 5 | `BLSTM_Attention` | 是 | seq_len, n_feat, n_hid, n_class, drop_prob |
+  | 6 | `CNN_BLSTM_Attention` | 是 | + n_filt |
+  | 7 | `CNN_BLSTM_Attention_Complete` | 否(仅loc) | + drop_hid, n_filt |
+  含 `create_model(name, ...)` 工厂函数 + 单元测试（forward + backward 全通过）。
 
-  所有架构的基类：
-  ```python
-  class BaseModel(nn.Module):
-      def __init__(self, seq_len, n_feat, n_hid, n_class, drop_prob, n_filt=None, drop_hid=None, n_membrane_class=3):
-          ...
-  ```
-
-  | # | 方法 | 双输出 | 关键结构 |
-  |---|------|--------|---------|
-  | 1 | `FFN` | 是(loc+membrane) | Flatten → Dense(n_hid) → Dropout → 2×Dense(softmax) |
-  | 2 | `CNN` | 是 | Conv1d(3)+Conv1d(5)→Concat→Conv1d(3)→MaxPool(5)→Dense |
-  | 3 | `BLSTM` | 是 | LSTM(forward)+LSTM(backward)→Concat(2*n_hid)→Dense |
-  | 4 | `CNN_BLSTM` | 是 | CNN → BiLSTM(return_sequences=False) → Dense |
-  | 5 | `BLSTM_Attention` | 是 | BiLSTM(return_sequences=True) → Attention → Dense |
-  | 6 | `CNN_BLSTM_Attention` | 是 | CNN → BiLSTM(return_seq=True) → Attention → Dense |
-  | 7 | `CNN_BLSTM_Attention_complete` | 否(仅loc) | Input Dropout → 6 parallel Conv1d(1,3,5,9,15,21) → Concat → Conv1d(128,3) → BiLSTM → Attention → Dense(Orthogonal init) → 2×Dropout → Softmax |
-
-  **移植注意点（逐一对照）**：
-  1. Keras `Permute((2,1))` → PyTorch `tensor.permute(0, 2, 1)` 或直接保持 `(N,C,L)` 格式
-  2. Keras `Conv1D(filters, kernel, data_format='channels_first')` → PyTorch `nn.Conv1d(in_channels, out_channels, kernel, padding='same')`
-  3. Keras `Bidirectional(LSTM(...))` → PyTorch `nn.LSTM(..., bidirectional=True)`
-  4. Keras 的完整版 LSTM 有 `return_state=True` → PyTorch LSTM 默认返回 `(output, (h_n, c_n))`
-  5. 完整版无 membrane 输出（单 head），其余 6 种有双输出
-  6. 完整版的 `layers[12].initial_states` → 在 PyTorch 中通过自定义 `h0/c0` 实现
-
-- [ ] **Step 2.3** — 编写 PyTorch Dataset（文件级按需加载）
+- [x] **Step 2.3** — 编写 PyTorch Dataset（文件级按需加载）✅
   文件：`python/data/dataset.py`
-  ```python
-  class ProteinDataset(torch.utils.data.Dataset):
-      def __init__(self, manifest_entries, features_dir, seq_len):
-          # manifest_entries: list of {'file': ..., 'y_location': ..., ...}
-          # 不预加载数据，仅保存索引和标签
-          self.entries = manifest_entries
-          self.features_dir = features_dir
-          self.seq_len = seq_len
-
-      def __len__(self): return len(self.entries)
-
-      def __getitem__(self, idx):
-          entry = self.entries[idx]
-          # 按需从磁盘加载单条 .pt
-          emb = torch.load(os.path.join(self.features_dir, entry['file']))
-          # 动态 padding 到固定长度
-          actual_len = min(emb.shape[0], self.seq_len)
-          X = torch.zeros(self.seq_len, 640, dtype=torch.float32)
-          X[:actual_len, :] = emb[:actual_len, :].float()
-          return X, entry['y_location'], entry['y_membrane']
-  ```
-  DataLoader 使用 `num_workers=4` 并行 I/O 加载。
+  `ProteinDataset(manifest_entries, features_dir, seq_len)` — 按需从磁盘加载独立 .pt 文件 + 动态 padding
+  包含 `load_manifest_split()` 和 `create_dataloaders()` 便捷函数 + 单元测试
 
 - [ ] **Step 2.4** — 编写训练脚本 `python/train.py`
   - 命令行参数：`--model`（选择架构）、`--data`（数据集路径）、`--epochs`、`--batch_size`、`--lr`
