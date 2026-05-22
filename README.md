@@ -64,6 +64,19 @@ Protein-subcellular-localization/
 
 ---
 
+## 开发进度
+
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| Phase 0 | 项目初始化 | ✅ 完成 |
+| Phase 1 | ESM-2 特征提取（13858 条序列，文件级存储） | ✅ 完成 |
+| Phase 2 | PyTorch 模型重写 | 🔄 进行中（Steps 2.1-2.5 ✅, 训练/评估已实现） |
+| Phase 3 | Java 后端 + MySQL | ⬜ 待开始 |
+| Phase 4 | Vue 3 前端 | ⬜ 待开始 |
+| Phase 5 | 联调测试 | ⬜ 待开始 |
+
+---
+
 ## 快速开始
 
 ### 1. 环境准备
@@ -85,7 +98,7 @@ pip install transformers biopython scikit-learn matplotlib pandas
 ```bash
 cd python
 python extract_features.py
-# 生成 dataset_esm2_1000.pt
+# 输出：data/features/{train,val,test}/XXXXX.pt (13858 个独立文件) + manifest.pt
 ```
 
 ### 3. 模型训练

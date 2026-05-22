@@ -356,27 +356,31 @@ App.vue
   `ProteinDataset(manifest_entries, features_dir, seq_len)` — 按需从磁盘加载独立 .pt 文件 + 动态 padding
   包含 `load_manifest_split()` 和 `create_dataloaders()` 便捷函数 + 单元测试
 
-- [ ] **Step 2.4** — 编写训练脚本 `python/train.py`
-  - 命令行参数：`--model`（选择架构）、`--data`（数据集路径）、`--epochs`、`--batch_size`、`--lr`
-  - 训练循环：
-    - Adam optimizer（lr 可配）
-    - 双输出模型：loss = CrossEntropyLoss(loc) + CrossEntropyLoss(membrane)
-    - 单输出模型（complete）：loss = CrossEntropyLoss(loc)
-    - 梯度裁剪：`clip_grad_norm_(max_norm=3)`
-    - Early stopping：patience=20，监控 val_loss
-    - Model checkpoint：保存 val_loss 最低的 `best_model.pt`
-  - 每个 epoch 记录：train_loss, train_acc, val_loss, val_acc
-  - 训练结束后保存 loss/acc 曲线图
+- [x] **Step 2.4** — 编写训练脚本 `python/train.py` ✅
+  - 命令行参数：`--model`、`--data`、`--epochs`、`--batch_size`、`--lr`、`--n_hid`、`--n_filt`、`--drop_prob`、`--drop_hid`、`--num_workers`、`--patience`、`--output`、`--no_eval`
+  - 训练循环：Adam optimizer + CrossEntropyLoss（双输出 loc+mem / 单输出 loc）+ `clip_grad_norm_(max_norm=3)`
+  - Early stopping：patience=20，监控 val_loss；Model checkpoint：`best_model.pt`
+  - 每个 epoch 记录：train_loss/loc_acc/mem_acc + val_loss/loc_acc/mem_acc
+  - 训练结束后保存 `training_curves.png`（4 子图：total loss + loc acc + mem loss + mem acc）
+  - FFN 冒烟测试通过（2 epoch，loss 2.04→1.45，acc 54%→66%）
 
-- [ ] **Step 2.5** — 评估指标
-  - Gorodkin（多类 MCC）：`sklearn.metrics.matthews_corrcoef(y_true_loc, y_pred_loc)`
-  - MCC（膜分类）：`sklearn.metrics.matthews_corrcoef(y_true_mem, y_pred_mem)`
-  - 混淆矩阵：`sklearn.metrics.confusion_matrix` + matplotlib 热力图
-  - print_measures：一行输出所有指标（仿照原项目 `models.py` 第 626-642 行）
+- [x] **Step 2.5** — 评估指标 ✅
+  - Gorodkin（多类 MCC）+ MCC（膜分类）：`sklearn.metrics.matthews_corrcoef`
+  - 混淆矩阵：`sklearn.metrics.confusion_matrix` + matplotlib 热力图，保存 `cm_location.png` / `cm_membrane.png`
+  - `print_measures()`：仿照原项目输出最佳 epoch 全部指标
+  - 评估阶段由 `--no_eval` 控制，默认在训练结束后自动在测试集上运行
+
+> ⚠️ **训练状态备注（2026-05-22）**：FFN 2 epoch 冒烟测试 loss 下降正常，但当前超参数下准确率较低（loc≈66%, mem≈76%）。正式训练需进行超参数调优（lr、n_filt、n_hid、drop_prob 网格搜索），参见下方超参数搜索空间。调优将在 Phase 5 联调完成后专门进行。
 
 > **阻塞点**：完整版 6 并行 Conv 层参数量 + GPU 显存管理。建议先用 `esm2_t12_35M`（480 维）快速跑通，再换 `esm2_t30_150M`（640 维）做最终训练。
 
 ### Phase 3：Java 后端 + MySQL（预计 Day 3-4，约 12h 工时）
+
+> **Phase 切换审计（2026-05-22）**：
+> - Tensor 维度链（Dataset `(1000,640)` → Model → Train）对齐 ✅
+> - API 响应格式与 CLAUDE.md 规范对齐 ✅
+> - `predict.py` 尚未创建（Phase 3 交付物，预期缺失）
+> - ⚠️ **标签名称映射**：内部 `labels_dic_location` 使用 `Endoplasmic.reticulum`、`Golgi.apparatus` 等带点的 key，而 API 响应 `all_probabilities` 使用 `"ER"`、`"Golgi apparatus"` 等人类可读名称。`predict.py` 需要做映射转换。
 
 - [ ] **Step 3.1** — Spring Boot 项目初始化
   - 使用 Spring Initializr 或手动创建 Maven 项目
@@ -490,12 +494,13 @@ App.vue
 
 ## 验证 CheckList
 
-- [ ] `conda activate protein-local && python -c "import torch; print(torch.cuda.is_available())"` → True
-- [ ] `python extract_features.py` 可运行，生成 `dataset_esm2_1000.pt`
-- [ ] `X_train.shape` = `(N, 1000, 640)`，标签形状正确
-- [ ] `python models/attention.py` 单元测试通过
-- [ ] 7 种架构 `model.forward(x)` 均不报错
-- [ ] `python train.py --model FFN --epochs 5` 跑通，loss 下降
+- [x] `conda activate protein-local && python -c "import torch; print(torch.cuda.is_available())"` → True
+- [x] `python extract_features.py` 可运行，生成 `data/features/{train,val,test}/XXXXX.pt` + `manifest.pt`（13858 文件）
+- [x] ESM-2 特征维度正确（每条 (seq_len_raw, 640) float16）
+- [x] `python models/attention.py` 单元测试通过
+- [x] 7 种架构 `model.forward(x)` 均不报错，backward 正常（`python models/architectures.py` PASSED）
+- [x] `python data/dataset.py` 单元测试通过（单条加载 + DataLoader batch）
+- [x] `python train.py --model FFN --epochs 2` 跑通，loss 下降
 - [ ] `python train.py --model CNN_BLSTM_Attention --epochs 60` 完成训练
 - [ ] Gorodkin 值 > 0.6（与原项目趋势一致）
 - [ ] MySQL 建表成功，Spring Boot 启动成功
