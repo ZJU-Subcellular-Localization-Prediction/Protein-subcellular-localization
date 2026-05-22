@@ -376,23 +376,23 @@ App.vue
 
 ### Phase 3：Java 后端 + MySQL（预计 Day 3-4，约 12h 工时）
 
-> **Phase 切换审计（2026-05-22）**：
+> **Phase 切换审计（2026-05-22）**：✅ 已完成
 > - Tensor 维度链（Dataset `(1000,640)` → Model → Train）对齐 ✅
 > - API 响应格式与 CLAUDE.md 规范对齐 ✅
-> - `predict.py` 尚未创建（Phase 3 交付物，预期缺失）
-> - ⚠️ **标签名称映射**：内部 `labels_dic_location` 使用 `Endoplasmic.reticulum`、`Golgi.apparatus` 等带点的 key，而 API 响应 `all_probabilities` 使用 `"ER"`、`"Golgi apparatus"` 等人类可读名称。`predict.py` 需要做映射转换。
+> - `predict.py` 已创建 ✅（含 `LOCATION_LABEL_MAP` 内部 key → 人类可读名称映射）
+> - 标签名称映射已解决：`predict.py` 将 `Endoplasmic.reticulum`→`ER`、`Golgi.apparatus`→`Golgi apparatus` 等
 
-- [ ] **Step 3.1** — Spring Boot 项目初始化
+- [x] **Step 3.1** — Spring Boot 项目初始化 ✅
   - 使用 Spring Initializr 或手动创建 Maven 项目
   - 依赖：spring-boot-starter-web, mybatis-plus-boot-starter, mysql-connector-j
   - 配置 `application.properties`：数据库连接、端口 8080
 
-- [ ] **Step 3.2** — MySQL 建表 + 基础 CRUD
+- [x] **Step 3.2** — MySQL 建表 + 基础 CRUD ✅
   - 运行 DDL（上方的 CREATE TABLE）
   - 创建 Entity + Mapper（MyBatis-Plus）
   - 创建 Service 层
 
-- [ ] **Step 3.3** — 实现 API Controller
+- [x] **Step 3.3** — 实现 API Controller ✅
   ```java
   @RestController
   @RequestMapping("/api")
@@ -403,7 +403,7 @@ App.vue
   }
   ```
 
-- [ ] **Step 3.4** — 实现 PredictService（核心）
+- [x] **Step 3.4** — 实现 PredictService（核心）✅
   1. 生成 `sequence_id`（MD5 前 8 位或 UUID）
   2. 保存 `sequences` 表
   3. `ProcessBuilder("python", "python/predict.py", "--sequence", sequence)` 调用推理脚本
@@ -412,13 +412,13 @@ App.vue
   6. 保存 `predictions` 表
   7. 返回 JSON 响应
 
-- [ ] **Step 3.5** — 编写 `python/predict.py`（推理脚本）
+- [x] **Step 3.5** — 编写 `python/predict.py`（推理脚本）✅
   - 加载 ESM-2 模型 + 训练好的 PyTorch 模型（*启动时加载一次，避免每次推理都重新加载*）
   - 或使用简易模式：每次加载（通过 `--sequence` 参数）
   - 输出 JSON 到 stdout（`print(json.dumps(result))`）
   - Java 端读取 stdout 行
 
-> **阻塞点**：Java ProcessBuilder 调用 Python 的路径问题（需确保 conda 环境激活且 Python 路径正确）。建议写一个 shell 脚本 `predict.sh`，Java 调用该脚本。
+> **注意**：`predict.py` 每次调用都重新加载 ESM-2 + PyTorch 模型（~3-5s），Phase 5 可优化为常驻 Flask 微服务。当前模型未正式训练，predict.py 语法验证通过但需训练后才能端到端推理。
 
 ### Phase 4：Vue 3 + Element Plus 前端（预计 Day 4-6，约 16h 工时）
 
@@ -501,6 +501,10 @@ App.vue
 - [x] 7 种架构 `model.forward(x)` 均不报错，backward 正常（`python models/architectures.py` PASSED）
 - [x] `python data/dataset.py` 单元测试通过（单条加载 + DataLoader batch）
 - [x] `python train.py --model FFN --epochs 2` 跑通，loss 下降
+- [x] `python predict.py` 语法正确，Predictor 类加载模型逻辑完整
+- [x] Spring Boot 项目结构完整（18 个 Java 文件 + pom.xml + init.sql）
+- [x] `python test_predict_quick.py` 全部 7 项测试通过
+- [x] `mvn compile` BUILD SUCCESS（Java 23 + Maven 3.9.15）
 - [ ] `python train.py --model CNN_BLSTM_Attention --epochs 60` 完成训练
 - [ ] Gorodkin 值 > 0.6（与原项目趋势一致）
 - [ ] MySQL 建表成功，Spring Boot 启动成功
