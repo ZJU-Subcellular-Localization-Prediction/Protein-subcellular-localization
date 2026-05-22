@@ -8,9 +8,9 @@
 - **当前目录**：`D:\test\Protein-subcellular-localization`
 - **原项目**：`D:\test\Protein-subcellular-localization-main`
 - **环境管理**：Anaconda（conda env）
-- **截止日期**：2026 年 5 月 28 日，剩余 8 天
-- **GPU 状态**：有 GPU（CUDA 12.1）
+- **GPU**：NVIDIA RTX 4060 Laptop（CUDA 12.1）
 - **ESM-2 模型**：`facebook/esm2_t30_150M_UR50D`（640 维嵌入，150M 参数）
+- **当前状态**：Phase 0-5 全部完成，全链路 E2E 测试通过，等待模型正式训练
 
 ---
 
@@ -251,16 +251,16 @@ CREATE TABLE predictions (
   }
 }
 ```
-	
-	**错误响应码**：
-	
-	| HTTP 码 | 含义 | 触发条件 |
-	|---------|------|---------|
-	| 400 | 请求参数错误 | 空序列、非氨基酸字符、`@Valid` 校验失败 |
-	| 502 | Python 推理失败 | 模型崩溃、GPU 显存不足、ESM-2 加载失败 |
-	| 503 | 推理服务不可用 | Python 脚本未找到、Python 可执行文件不存在 |
-	| 504 | 推理超时 | 超过 `predict.python.timeout-seconds`（默认 60s） |
-	| 500 | 内部未知错误 | 未预期的运行时异常 |
+
+**错误响应**：
+
+| HTTP 码 | 含义 | 触发条件 | 响应体示例 |
+|---------|------|---------|-----------|
+| 400 | 请求参数错误 | 空序列、非氨基酸字符、`@Valid` 校验失败 | `{"code":400, "message":"Sequence is empty or contains no valid amino acids", "data":null}` |
+| 502 | Python 推理失败 | 模型崩溃、GPU 显存不足、ESM-2 加载失败、JSON 解析失败 | `{"code":502, "message":"Python inference failed (exit code 1). stderr: CUDA out of memory...", "data":null}` |
+| 503 | 推理服务不可用 | Python 脚本未找到、Python 可执行文件无效 | `{"code":503, "message":"Failed to start Python process...", "data":null}` |
+| 504 | 推理超时 | 超过 `predict.python.timeout-seconds`（默认 60s） | `{"code":504, "message":"Inference timed out after 60s...", "data":null}` |
+| 500 | 内部未知错误 | 未预期的运行时异常 | `{"code":500, "message":"Unexpected error occurred", "data":null}` |
 
 ### GET /api/history?page=1&size=20
 
@@ -281,23 +281,73 @@ CREATE TABLE predictions (
 }
 ```
 
+### GET /api/history/{id}
+
+响应：
+```json
+{
+  "code": 200,
+  "data": {
+    "id": 1,
+    "sequenceId": "abc123",
+    "predictedLocation": "Extracellular",
+    "locationConfidence": 0.923,
+    "predictedMembrane": "Soluble",
+    "membraneConfidence": 0.871,
+    "modelVersion": "v1",
+    "inferenceTimeMs": 357,
+    "allProbabilities": {
+      "Cell membrane": 0.012, "Cytoplasm": 0.008, "ER": 0.015,
+      "Golgi apparatus": 0.003, "Lysosome + Vacuole": 0.005,
+      "Mitochondrion": 0.018, "Nucleus": 0.003,
+      "Peroxisome": 0.002, "Plastid": 0.001, "Extracellular": 0.923
+    },
+    "createdAt": "2026-05-22 14:30:00"
+  }
+}
+```
+
+> **注意**：history 列表接口 (`/api/history`) 返回的 records 数组内对象 key 为 snake_case（Map 序列化时 Jackson 不转换 key）。详情接口 (`/api/history/{id}`) 的 key 为 camelCase（手动 `map.put` 时指定）。
+
 ---
 
 ## Vue 组件树 & 路由
 
+### 组件树
+
 ```
 App.vue
 ├── Home.vue          (/)              — 项目介绍 + 技术架构
-├── Predict.vue       (/predict)       — 核心预测页
-│   ├── SequenceInput.vue              — 序列输入（文本框 + 上传 + 示例）
-│   ├── ResultCard.vue                 — 预测结果卡片
-│   ├── CellDiagram.vue                — SVG 细胞结构图（动态高亮）
-│   ├── ProbabilityChart.vue           — ECharts 概率分布柱状图
-│   └── AttentionHeatmap.vue           — Attention 权重热力图
+├── Predict.vue       (/predict)       — 核心预测页（状态宿主）
+│   ├── SequenceInput.vue              — 序列输入 + 上传 + 实时校验
+│   │   Emit: @submit(sequence), @clear
+│   ├── ResultCard.vue                 — 预测结果卡片（环形进度 + 置信度色标）
+│   │   Props: location, confidence, membrane, membraneConfidence,
+│   │          inferenceTimeMs, sequenceId, modelVersion
+│   ├── CellDiagram.vue                — SVG 细胞图（预测高亮 + 空数据占位）
+│   │   Props: highlightLocation, allProbabilities
+│   ├── ProbabilityChart.vue           — ECharts 概率柱状图（10 类固定色）
+│   │   Props: probabilities (Object)
+│   └── AttentionHeatmap.vue           — 权重热力图（1D/2D/多头自适应）
+│       Props: attentionWeights (Array)
 ├── History.vue       (/history)       — 历史记录
-│   └── HistoryTable.vue               — el-table + el-pagination
+│   └── HistoryTable.vue               — 表格 + 分页 + 行点击详情弹窗
 └── About.vue         (/about)         — 团队 + 技术栈
 ```
+
+### API → 组件字段映射
+
+| HTTP 响应 key | Predict.vue 引用 | 子组件 Prop |
+|--------------|-------------------|-------------|
+| `predicted_location` | `result.predicted_location` | `:location` |
+| `location_confidence` | `result.location_confidence` | `:confidence` |
+| `predicted_membrane` | `result.predicted_membrane` | `:membrane` |
+| `membrane_confidence` | `result.membrane_confidence` | `:membrane-confidence` |
+| `inference_time_ms` | `result.inference_time_ms` | `:inference-time-ms` |
+| `sequence_id` | `result.sequence_id` | `:sequence-id` |
+| `model_version` | `result.model_version` | `:model-version` |
+| `all_probabilities` | `result.all_probabilities` | `:probabilities` / `:all-probabilities` |
+| `attention_weights` | `result.attention_weights` | `:attention-weights` |
 
 ---
 
@@ -428,7 +478,7 @@ App.vue
   - 输出 JSON 到 stdout（`print(json.dumps(result))`）
   - Java 端读取 stdout 行
 
-> **注意**：`predict.py` 每次调用都重新加载 ESM-2 + PyTorch 模型（~3-5s），Phase 5 可优化为常驻 Flask 微服务。当前模型未正式训练，predict.py 语法验证通过但需训练后才能端到端推理。
+> **注意**：`predict.py` 当前采用每次调用重新加载策略（ESM-2 + 模型 ~3-5s），GPU 推理耗时可接受（~357ms）。模型已训练 CNN_BLSTM_Attention（Epoch 6），端到端推理可用。性能优化空间：改为常驻 Flask 微服务可消除加载延迟。
 
 ### Phase 4：Vue 3 + Element Plus 前端（预计 Day 4-6，约 16h 工时）
 
@@ -573,11 +623,33 @@ Protein-subcellular-localization/
 │           ├── test/00000.pt ...
 │           └── manifest.pt      # 索引 + labels + 元信息
 ├── backend/
-│   ├── src/main/java/...
+│   ├── src/main/java/com/proteinlocal/
+│   │   ├── ProteinLocalApplication.java
+│   │   ├── config/MybatisPlusConfig.java
+│   │   ├── controller/
+│   │   │   ├── PredictController.java
+│   │   │   └── GlobalExceptionHandler.java
+│   │   ├── dto/
+│   │   │   ├── ApiResponse.java
+│   │   │   ├── HistoryPage.java
+│   │   │   ├── PredictRequest.java
+│   │   │   └── PredictResponse.java
+│   │   ├── entity/
+│   │   │   ├── Prediction.java
+│   │   │   └── Sequence.java
+│   │   ├── exception/
+│   │   │   └── PredictException.java
+│   │   ├── mapper/
+│   │   │   ├── PredictionMapper.java
+│   │   │   └── SequenceMapper.java
+│   │   └── service/
+│   │       ├── PredictService.java
+│   │       ├── PredictionService.java
+│   │       └── SequenceService.java
 │   ├── src/main/resources/application.properties
 │   ├── pom.xml
 │   └── sql/
-│       └── init.sql             # 建表 DDL
+│       └── init.sql
 ├── frontend/
 │   ├── src/
 │   │   ├── views/               # Home, Predict, History, About
