@@ -13,22 +13,19 @@ build/
 .python-version
 *.conda
 
-# PyTorch
-*.pt
-*.pth
-*.ckpt
-checkpoints/
+# PyTorch — feature embeddings (7.9 GB, regeneratable via extract_features.py)
+python/data/features/train/
+python/data/features/val/
+python/data/features/test/
 
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
 
-# Matplotlib
-*.png
-*.jpg
-*.jpeg
-*.svg
-*.pdf
+# Matplotlib / training outputs (auto-generated)
+python/outputs/*/training_curves.png
+python/outputs/*/cm_location.png
+python/outputs/*/cm_membrane.png
 
 # ===== Java / Spring Boot / Maven =====
 target/
@@ -81,4 +78,5 @@ logs/
 temp/
 tmp/
 
-.claude
+# ===== Claude Code =====
+.claude/

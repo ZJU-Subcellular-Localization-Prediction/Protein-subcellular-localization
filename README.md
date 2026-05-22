@@ -166,6 +166,102 @@ npm run dev
 
 ---
 
+## 团队协作快速启动（零门槛开箱指南）
+
+> 以下指南面向从零开始克隆仓库的队友，按顺序执行即可在本地跑通完整全栈服务。
+
+### Step 1 — 克隆仓库
+
+```bash
+git clone git@github.com:<your-org>/Protein-subcellular-localization.git
+cd Protein-subcellular-localization
+```
+
+### Step 2 — 导入 Conda 算法环境
+
+项目维护者在首次配置好环境后，应导出环境文件供队友一键复现：
+
+**维护者（环境导出）**：
+```bash
+conda activate protein-local
+conda env export --no-builds > python/environment.yml
+git add python/environment.yml
+git commit -m "chore: export conda environment.yml"
+git push
+```
+
+**队友（环境导入）**：
+```bash
+conda env create -f python/environment.yml
+conda activate protein-local
+```
+
+### Step 3 — 下载 ESM-2 模型（首次，需联网）
+
+```bash
+# 模型约 600 MB，下载到本地 HuggingFace 缓存
+python -c "from transformers import AutoTokenizer, AutoModel; AutoTokenizer.from_pretrained('facebook/esm2_t30_150M_UR50D'); AutoModel.from_pretrained('facebook/esm2_t30_150M_UR50D')"
+```
+
+> 下载完毕后，后端会自动以离线模式调用（`HF_HUB_OFFLINE=1`），无需再次联网。
+
+### Step 4 — 生成特征文件（可选，耗时较长）
+
+```bash
+cd python
+python extract_features.py
+# 约 1-2 小时（GPU），生成 data/features/ 下 13858 个 .pt 文件（约 8 GB）
+```
+
+> 如果只需要测试推理功能（不重新训练模型），可跳过此步。仓库中已包含 `manifest.pt`（标签索引）和预训练模型权重。
+
+### Step 5 — 配置并启动后端
+
+```bash
+# 1. 创建数据库
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS protein_localization;"
+mysql -u root -p protein_localization < backend/sql/init.sql
+
+# 2. 编辑 backend/src/main/resources/application.properties
+#    修改 spring.datasource.password 和 predict.python.path
+
+# 3. 启动
+cd backend
+mvn compile spring-boot:run
+```
+
+### Step 6 — 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+# 打开浏览器 http://localhost:5173 → Predict → Load Example → Submit
+```
+
+### 预训练模型权重
+
+| 文件 | 大小 | 获取方式 |
+|------|------|---------|
+| `outputs/*/best_model.pt` | ~3.5 MB | **Git 仓库已包含**（GitHub 可直接托管） |
+| `python/data/features/train/` | ~5 GB | 运行 `extract_features.py` 生成 |
+| `python/data/features/val/` | ~1.5 GB | 运行 `extract_features.py` 生成 |
+| `python/data/features/test/` | ~1.5 GB | 运行 `extract_features.py` 生成 |
+| `python/data/features/manifest.pt` | ~700 KB | **Git 仓库已包含** |
+
+### 常见问题
+
+| 问题 | 解决方案 |
+|------|---------|
+| `ModuleNotFoundError: No module named 'torch'` | 确认已激活 conda 环境：`conda activate protein-local` |
+| `Cannot connect to backend` | 检查 Spring Boot 是否启动在 8080 端口 |
+| Python 推理超时 / 500 错误 | 检查 `predict.python.path` 是否正确指向 conda env 的 `python.exe` |
+| `HF_HUB_OFFLINE=1` 报错找不到模型 | 执行 Step 3 下载 ESM-2 模型到本地缓存 |
+| MySQL `Access denied` | 检查 `application.properties` 中 `spring.datasource.password` |
+| `npm: command not found` | 安装 Node.js ≥18：https://nodejs.org/ |
+
+---
+
 ## API 接口
 
 ### 接口列表
