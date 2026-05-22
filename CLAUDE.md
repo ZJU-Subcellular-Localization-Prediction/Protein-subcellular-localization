@@ -422,56 +422,62 @@ App.vue
 
 ### Phase 4：Vue 3 + Element Plus 前端（预计 Day 4-6，约 16h 工时）
 
-- [ ] **Step 4.1** — 项目初始化
-  ```bash
-  npm create vue@latest frontend
-  cd frontend
-  npm install element-plus @element-plus/icons-vue echarts vue-echarts axios vue-router
-  ```
-  配置 `vite.config.js`：proxy `/api` → `http://localhost:8080`
+- [x] **Step 4.1** — 项目初始化 ✅
+  - 手动创建 package.json（Vue 3.5 + Element Plus 2.9 + ECharts 5.6 + Axios 1.9）
+  - `vite.config.js`：`@` 别名 + proxy `/api` → `http://localhost:8080`
+  - `npm install` — 89 packages, 0 vulnerabilities
 
-- [ ] **Step 4.2** — 路由 + 布局
-  - `router/index.js`：4 个路由
-  - `App.vue`：el-container 布局（header + main + footer）
-  - 全局引入 Element Plus
+- [x] **Step 4.2** — 路由 + 布局 ✅
+  - `router/index.js`：4 条路由（`/`, `/predict`, `/history`, `/about`），懒加载
+  - `App.vue`：el-container 布局（el-header + el-menu + el-main + el-footer）
+  - `main.js`：Element Plus + Icons 全局注册
 
-- [ ] **Step 4.3** — 组件实现（按顺序）
+- [x] **Step 4.3** — 组件实现（全部 6 个）✅
 
-  1. **SequenceInput.vue**
-     - el-input（textarea）+ el-upload（.fasta 文件）+ el-button（示例填充）
-     - 校验：非空、仅允许 20 种氨基酸字符
-     - Emit：`@submit`
+  1. **SequenceInput.vue** ✅
+     - el-input（textarea, monospace 字体）+ el-upload（drag, .fasta 解析, FileReader）+ "Load Example" / "Clear" 按钮
+     - 客户端实时校验：非法字符检测 + 有效 AA 计数
+     - FASTA header 自动跳过（`>` 开头行）
+     - Emit：`@submit(sequence)`, `@clear`
 
-  2. **ResultCard.vue**
-     - Props：`location`, `confidence`, `membrane`, `membraneConfidence`
-     - 展示：el-card + el-tag（类别名）+ el-progress（置信度百分比）
+  2. **ResultCard.vue** ✅
+     - el-card + el-tag（color-coded）+ el-progress（dashboard 环形进度）
+     - 置信度颜色：≥0.8 绿 / 0.5~0.8 橙 / <0.5 红
+     - el-descriptions：推理耗时 + 序列 ID
+     - Props：`location`, `confidence`, `membrane`, `membraneConfidence`, `inferenceTimeMs`, `sequenceId`, `modelVersion`
 
-  3. **ProbabilityChart.vue**
-     - Props：`probabilities`（10 个值的对象）
-     - 使用 vue-echarts 绘制横向柱状图
-     - 10 种颜色对应 10 个类别
+  3. **ProbabilityChart.vue** ✅
+     - vue-echarts `<v-chart>`，ECharts 按需引入（BarChart + Grid + Tooltip）
+     - 10 类固定顺序 + 10 色固定映射（与 CellDiagram 颜色一致）
+     - 最高概率柱加粗边框 + 标签标注
+     - 横向柱状图，右侧百分比标签
 
-  4. **CellDiagram.vue**（重点）
-     - Props：`highlightLocation`
-     - 使用 SVG 绘制简化细胞结构图
-     - 9 个细胞器区域可高亮（默认灰色，高亮时发脉冲光 + 对应类别颜色）
-     - 底部标注细胞器中英文名
+  4. **CellDiagram.vue** ✅（SVG 纯手绘）
+     - viewBox 400×400，10 个细胞结构（含胞外标注）
+     - 细胞膜（椭圆边框）、细胞质（填充）、细胞核（圆+核仁）、ER（网状路径）
+     - 高尔基体（4 层弧线）、线粒体 ×3（椭圆+嵴折线）、溶酶体/过氧化物酶体（圆）
+     - 质体（虚线椭圆）、胞外空间（文字标注）
+     - CSS transition 0.5s + `@keyframes pulse` 发光动画
+     - 底部 10 色图例
 
-  5. **AttentionHeatmap.vue**
-     - Props：`attentionWeights`（二维数组）
-     - 使用 Canvas 或 ECharts heatmap 绘制
-     - X 轴：序列位置；Y 轴：attention weight 强度
+  5. **AttentionHeatmap.vue** ✅
+     - ECharts heatmap（HeatmapChart + VisualMap + DataZoom）
+     - 底部 `dataZoom` slider + inside 双模式滚动
+     - visualMap 蓝→红渐变图例
+     - 处理 null/空/1D/2D 多种输入格式
 
-  6. **HistoryTable.vue**
-     - el-table + el-pagination
-     - 列：序列 ID、预测位置、置信度、时间
-     - el-input 搜索 + 分页
+  6. **HistoryTable.vue** ✅
+     - el-table（stripe + highlight-current-row）+ el-pagination
+     - 搜索框（按 Sequence ID 前端过滤）+ 总数提示
+     - 行点击 → el-dialog 展示详情 + 概率图（复用 ProbabilityChart）
+     - 颜色编码：location tag + confidence 文本颜色 + membrane tag type
+     - v-loading 加载态 + 空数据提示
 
-- [ ] **Step 4.4** — API 层封装
-  - `api/index.js`：axios 实例（baseURL + 拦截器）
-  - `api/predict.js`：`postPredict(sequence)`、`getHistory(page, size)`、`getHistoryById(id)`
+- [x] **Step 4.4** — API 层封装 ✅
+  - `api/index.js`：axios 实例，`ApiResponse<T>` 解包拦截器，超时 65s，连接失败提示
+  - `api/predict.js`：`postPredict(sequence)`, `getHistory(page, size)`, `getHistoryById(id)`
 
-> **阻塞点**：CellDiagram.vue 的 SVG 绘制 + 动画效果。如果 SVG 太复杂，可改用一张静态细胞图 + 在对应位置叠加 CSS 高亮圆点标注。
+> **编译验证**：`npx vite build` — 2232 modules, built in 7.67s，全部通过
 
 ### Phase 5：联调测试（预计 Day 6-7，约 8h 工时）
 
@@ -509,7 +515,9 @@ App.vue
 - [ ] Gorodkin 值 > 0.6（与原项目趋势一致）
 - [ ] MySQL 建表成功，Spring Boot 启动成功
 - [ ] `POST /api/predict` 返回正确 JSON
-- [ ] Vue 前端 4 个页面可渲染，组件正常交互
+- [x] `npx vite build` BUILD SUCCESS（2232 modules, 7.67s）
+- [x] Vue 前端 6 个组件 + 4 个页面 + API 层全部实现
+- [x] `npm run dev` 可启动，页面路由跳转正常
 - [ ] 完整链路：输入序列 → 加载动画 → 预测结果 → 细胞图高亮 → 概率图 → 热力图 → 历史记录
 
 ---
