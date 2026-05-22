@@ -8,7 +8,7 @@ import router from './router'
 
 const app = createApp(App)
 
-app.use(ElementPlus, { locale: undefined })  // default zh-CN from browser
+app.use(ElementPlus)
 app.use(router)
 
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {

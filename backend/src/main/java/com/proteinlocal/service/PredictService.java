@@ -1,8 +1,8 @@
 package com.proteinlocal.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.proteinlocal.dto.PredictResponse;
+import com.proteinlocal.exception.PredictException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,7 +21,7 @@ public class PredictService {
 
     private static final Logger log = LoggerFactory.getLogger(PredictService.class);
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
     @Value("${predict.python.path:python}")
     private String pythonPath;
@@ -34,6 +34,10 @@ public class PredictService {
 
     @Value("${predict.model.path:best_model.pt}")
     private String modelPath;
+
+    public PredictService(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
 
     /**
      * Generate a short hash ID from the raw sequence (MD5 first 12 chars).
@@ -78,9 +82,14 @@ public class PredictService {
             PredictResponse resp = objectMapper.readValue(json, PredictResponse.class);
             resp.setSequenceId(sequenceId);
             return resp;
+        } catch (PredictException e) {
+            throw e; // re-throw as-is — already has correct status code
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.error("Failed to parse Python JSON output for sequence {}", sequenceId, e);
+            throw new PredictException(502, "Failed to parse inference result", e);
         } catch (Exception e) {
-            log.error("Python inference failed for sequence {}", sequenceId, e);
-            throw new RuntimeException("Inference failed: " + e.getMessage(), e);
+            log.error("Unexpected error during inference for sequence {}", sequenceId, e);
+            throw new PredictException(500, "Inference failed: " + e.getMessage(), e);
         }
     }
 
@@ -89,7 +98,21 @@ public class PredictService {
         if (!scriptFile.exists()) {
             scriptFile = new File("../" + scriptPath);
         }
+        if (!scriptFile.exists()) {
+            throw new PredictException(503,
+                    "Python inference script not found: " + scriptPath
+                    + ". Please ensure predict.python.script points to a valid file.");
+        }
         String absScript = scriptFile.getAbsolutePath();
+
+        File modelFile = new File(modelPath);
+        if (!modelFile.exists()) {
+            // model path is relative to script directory
+            modelFile = new File(scriptFile.getParentFile(), modelPath);
+        }
+        if (!modelFile.exists()) {
+            log.error("Model checkpoint not found: {}", modelPath);
+        }
 
         ProcessBuilder pb = new ProcessBuilder(
                 pythonPath, absScript, "--sequence", sequence, "--model-path", modelPath
@@ -101,7 +124,14 @@ public class PredictService {
 
         log.info("Running: {} {} --sequence <SEQ>", pythonPath, absScript);
 
-        Process process = pb.start();
+        Process process;
+        try {
+            process = pb.start();
+        } catch (java.io.IOException e) {
+            throw new PredictException(503,
+                    "Failed to start Python process. Check that "
+                    + pythonPath + " is a valid Python executable.", e);
+        }
 
         // Read stdout
         String stdout;
@@ -120,12 +150,18 @@ public class PredictService {
         boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
         if (!finished) {
             process.destroyForcibly();
-            throw new RuntimeException("Python inference timed out after " + timeoutSeconds + "s");
+            throw new PredictException(504,
+                    "Inference timed out after " + timeoutSeconds + "s. "
+                    + "The model may be overloaded — please try again later.");
         }
 
         int exitCode = process.exitValue();
         if (exitCode != 0) {
-            throw new RuntimeException("Python exited with code " + exitCode + ": " + stderr);
+            String detail = stderr.isBlank() ? "(no stderr output)" : stderr;
+            log.error("Python exited with code {}: {}", exitCode, detail);
+            throw new PredictException(502,
+                    "Python inference failed (exit code " + exitCode + "). "
+                    + "stderr: " + detail);
         }
 
         // Extract the last JSON line from stdout (skip log lines)
@@ -139,7 +175,8 @@ public class PredictService {
             }
         }
         if (jsonLine == null) {
-            throw new RuntimeException("No JSON found in Python stdout. Output:\n" + stdout);
+            throw new PredictException(502,
+                    "Python produced no valid JSON output. stdout:\n" + stdout);
         }
 
         return jsonLine;

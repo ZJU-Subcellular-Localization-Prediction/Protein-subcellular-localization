@@ -78,7 +78,8 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import SequenceInput from '@/components/SequenceInput.vue'
 import ResultCard from '@/components/ResultCard.vue'
 import ProbabilityChart from '@/components/ProbabilityChart.vue'
@@ -123,7 +124,7 @@ function startLoadingAnimation() {
   }, 1500)
 }
 
-function stopLoadingAnimation() {
+function finishLoadingAnimation() {
   clearInterval(hintTimer)
   clearInterval(progressTimer)
   hintTimer = null
@@ -141,11 +142,15 @@ async function handleSubmit(sequence) {
   try {
     const resp = await postPredict(sequence)
     result.value = resp
+    ElMessage.success(`Prediction complete — ${resp.predicted_location} (${(resp.location_confidence * 100).toFixed(1)}%) in ${resp.inference_time_ms}ms`)
   } catch (e) {
-    error.value = e.message || 'Unknown error occurred'
+    const msg = e.message || 'Unknown error occurred'
+    error.value = msg
+    ElMessage.error(msg)
   } finally {
-    stopLoadingAnimation()
-    loading.value = false
+    finishLoadingAnimation()
+    // brief delay so user sees progress hit 100% before result renders
+    setTimeout(() => { loading.value = false }, 350)
   }
 }
 

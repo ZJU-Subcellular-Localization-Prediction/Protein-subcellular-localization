@@ -36,12 +36,24 @@ const hasData = computed(() => {
 })
 
 const chartOption = computed(() => {
-  // Flatten 2D array: attentionWeights is number[][]
-  // Each row: positions, each col (usually 1): weight value
   const weights = props.attentionWeights || []
-  const flat = Array.isArray(weights[0])
-    ? weights[0].length !== undefined ? weights[0] : []
-    : weights
+  if (!weights.length) return {}
+
+  let flat
+  if (Array.isArray(weights[0])) {
+    // 2D array — could be single-head [[w1], [w2], ...] or multi-head [[a1,b1], [a2,b2], ...]
+    const innerLen = weights[0].length
+    if (innerLen === 1) {
+      // single-head: unwrap
+      flat = weights.map(w => w[0])
+    } else {
+      // multi-head: average across heads
+      flat = weights.map(w => w.reduce((s, v) => s + v, 0) / w.length)
+    }
+  } else {
+    // 1D array: use as-is
+    flat = weights
+  }
 
   const data = flat.map((w, i) => [i, 0, w])
   const maxVal = Math.max(...flat, 0.001)

@@ -5,7 +5,13 @@
     </template>
 
     <div class="diagram-wrapper">
-      <svg viewBox="0 0 400 400" class="cell-svg" xmlns="http://www.w3.org/2000/svg">
+      <!-- No-data overlay -->
+      <div v-if="isEmpty" class="empty-overlay">
+        <el-icon :size="28"><WarningFilled /></el-icon>
+        <span>No prediction data</span>
+      </div>
+
+      <svg viewBox="0 0 400 400" class="cell-svg" xmlns="http://www.w3.org/2000/svg" :class="{ dimmed: isEmpty }">
 
         <!-- Cytoplasm background -->
         <ellipse
@@ -156,6 +162,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
+import { WarningFilled } from '@element-plus/icons-vue'
 
 const props = defineProps({
   highlightLocation: { type: String, default: '' },
@@ -163,6 +170,12 @@ const props = defineProps({
 })
 
 const hoveredLocation = ref(null)
+
+const isEmpty = computed(() => {
+  const p = props.allProbabilities
+  if (!p || Object.keys(p).length === 0) return true
+  return Object.values(p).every(v => v == null || v === 0)
+})
 
 // Color palette
 const LOC_COLORS = {
@@ -256,12 +269,31 @@ const mitochondria = [
 
 .diagram-wrapper {
   width: 100%;
+  position: relative;
 }
 
 .cell-svg {
   width: 100%;
   height: auto;
   max-height: 380px;
+}
+
+.cell-svg.dimmed {
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+.empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #909399;
+  font-size: 14px;
+  z-index: 2;
 }
 
 .compartment {

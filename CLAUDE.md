@@ -251,6 +251,16 @@ CREATE TABLE predictions (
   }
 }
 ```
+	
+	**错误响应码**：
+	
+	| HTTP 码 | 含义 | 触发条件 |
+	|---------|------|---------|
+	| 400 | 请求参数错误 | 空序列、非氨基酸字符、`@Valid` 校验失败 |
+	| 502 | Python 推理失败 | 模型崩溃、GPU 显存不足、ESM-2 加载失败 |
+	| 503 | 推理服务不可用 | Python 脚本未找到、Python 可执行文件不存在 |
+	| 504 | 推理超时 | 超过 `predict.python.timeout-seconds`（默认 60s） |
+	| 500 | 内部未知错误 | 未预期的运行时异常 |
 
 ### GET /api/history?page=1&size=20
 
@@ -494,6 +504,10 @@ App.vue
   > 4. **JSON 序列化契约不匹配**: Python 输出 snake_case，Java DTO 默认 camelCase → `PredictResponse.java` 全部字段加 `@JsonProperty("snake_case_name")` + `@JsonIgnoreProperties(ignoreUnknown=true)`
   > 5. **前端字段绑定失效**: `@JsonProperty` 双向生效导致后端序列化输出变为 snake_case → `Predict.vue` 全部 `result.xxx` 引用改为 snake_case
   > 6. **ResultCard NaN 防御**: `confidencePercent` 加 null/NaN 兜底 → 0
+
+  > **代码审查优化（2026-05-22）**：
+  > - **后端**：新增 `PredictException(statusCode)` 细化异常分类 → `GlobalExceptionHandler` 按 502/503/504 返回精确 HTTP 码；`ObjectMapper` 改为 Spring 注入；移除未使用 `TypeReference` import
+  > - **前端**：Loading 完成平滑过渡 350ms + `ElMessage` toast 通知；`AttentionHeatmap` 支持多头 attention 均值聚合；`CellDiagram` 空数据半透明 + 占位提示；`About.vue` 外链加 `rel="noopener noreferrer"`；移除 `console.error` 残留 + `main.js` 冗余参数
 
 - [x] **Step 5.2** — 边界情况 ✅
   - 空输入 → 前端按钮 disabled（`validCharCount > 0` 校验）+ 后端 `@NotBlank` + 400

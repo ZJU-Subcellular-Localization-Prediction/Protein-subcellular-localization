@@ -27,7 +27,7 @@
           <ul class="ref-list">
             <li>Almagro Armenteros JJ, et al. <em>DeepLoc: prediction of protein subcellular localization using deep learning</em>. Bioinformatics, 2017.</li>
             <li>ESM-2: Lin Z, et al. <em>Evolutionary-scale prediction of atomic-level protein structure with a language model</em>. Science, 2023.</li>
-            <li><a href="https://github.com/ClaudiaRaffaelli/Protein-subcellular-localization" target="_blank">Original Keras/TensorFlow Project</a></li>
+            <li><a href="https://github.com/ClaudiaRaffaelli/Protein-subcellular-localization" target="_blank" rel="noopener noreferrer">Original Keras/TensorFlow Project</a></li>
           </ul>
         </el-card>
       </el-col>

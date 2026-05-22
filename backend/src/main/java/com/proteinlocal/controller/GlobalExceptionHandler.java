@@ -1,9 +1,11 @@
 package com.proteinlocal.controller;
 
 import com.proteinlocal.dto.ApiResponse;
+import com.proteinlocal.exception.PredictException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -28,6 +30,13 @@ public class GlobalExceptionHandler {
                 .reduce((a, b) -> a + "; " + b)
                 .orElse("Validation failed");
         return ApiResponse.error(400, msg);
+    }
+
+    @ExceptionHandler(PredictException.class)
+    public ResponseEntity<ApiResponse<Void>> handlePredict(PredictException e) {
+        int code = e.getStatusCode();
+        log.error("Predict error [{}]: {}", code, e.getMessage());
+        return ResponseEntity.status(code).body(ApiResponse.error(code, e.getMessage()));
     }
 
     @ExceptionHandler(RuntimeException.class)

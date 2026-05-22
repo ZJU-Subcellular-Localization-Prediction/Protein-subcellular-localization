@@ -154,7 +154,7 @@ async function fetchHistory() {
     allRecords.value = resp.records || []
     total.value = resp.total || 0
   } catch (e) {
-    console.error('Failed to fetch history:', e.message)
+    // silently fall back to list data
   } finally {
     loading.value = false
   }
@@ -172,7 +172,6 @@ async function onRowClick(row) {
     const resp = await getHistoryById(row.id)
     detail.value = resp
   } catch (e) {
-    console.error('Failed to fetch detail:', e.message)
     detail.value = row // fallback to list data
   }
 }
