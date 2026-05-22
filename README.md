@@ -173,7 +173,7 @@ npm run dev
 ### Step 1 — 克隆仓库
 
 ```bash
-git clone git@github.com:<your-org>/Protein-subcellular-localization.git
+git clone git@github.com:ZJU-Subcellular-Localization-Prediction/Protein-subcellular-localization.git
 cd Protein-subcellular-localization
 ```
 
