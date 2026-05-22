@@ -50,6 +50,15 @@
     />
 
     <el-alert
+      v-if="lengthWarning"
+      :title="lengthWarning"
+      type="info"
+      :closable="true"
+      show-icon
+      class="validation-alert"
+    />
+
+    <el-alert
       v-if="warning"
       :title="warning"
       type="info"
@@ -82,7 +91,16 @@ const validCharCount = computed(() => {
   return valid ? valid.length : 0
 })
 
+const MAX_SEQ_LEN = 1000
+
 const canSubmit = computed(() => validCharCount.value > 0)
+
+const lengthWarning = computed(() => {
+  if (validCharCount.value > MAX_SEQ_LEN) {
+    return `Sequence is ${validCharCount.value} AA long — it will be center-truncated to ${MAX_SEQ_LEN} AA before inference.`
+  }
+  return ''
+})
 
 // ---- methods ----
 function onInput() {

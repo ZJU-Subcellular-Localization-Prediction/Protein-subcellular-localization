@@ -86,7 +86,11 @@ const props = defineProps({
   modelVersion: { type: String, default: '' }
 })
 
-const confidencePercent = computed(() => Math.round(props.confidence * 100))
+const confidencePercent = computed(() => {
+  const c = props.confidence
+  if (c == null || isNaN(c)) return 0
+  return Math.round(c * 100)
+})
 
 const progressColor = computed(() => {
   if (props.confidence >= 0.8) return '#67c23a'

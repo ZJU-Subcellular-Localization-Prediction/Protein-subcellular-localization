@@ -41,30 +41,30 @@
     <!-- Results -->
     <template v-if="result && !loading">
       <ResultCard
-        :location="result.predictedLocation"
-        :confidence="result.locationConfidence"
-        :membrane="result.predictedMembrane"
-        :membrane-confidence="result.membraneConfidence"
-        :inference-time-ms="result.inferenceTimeMs"
-        :sequence-id="result.sequenceId"
-        :model-version="result.modelVersion"
+        :location="result.predicted_location"
+        :confidence="result.location_confidence"
+        :membrane="result.predicted_membrane"
+        :membrane-confidence="result.membrane_confidence"
+        :inference-time-ms="result.inference_time_ms"
+        :sequence-id="result.sequence_id"
+        :model-version="result.model_version"
       />
 
       <el-row :gutter="20" class="viz-row">
         <el-col :md="12" :sm="24">
           <CellDiagram
-            :highlight-location="result.predictedLocation"
-            :all-probabilities="result.allProbabilities"
+            :highlight-location="result.predicted_location"
+            :all-probabilities="result.all_probabilities"
           />
         </el-col>
         <el-col :md="12" :sm="24">
-          <ProbabilityChart :probabilities="result.allProbabilities" />
+          <ProbabilityChart :probabilities="result.all_probabilities" />
         </el-col>
       </el-row>
 
       <AttentionHeatmap
-        v-if="result.attentionWeights && result.attentionWeights.length > 0"
-        :attention-weights="result.attentionWeights"
+        v-if="result.attention_weights && result.attention_weights.length > 0"
+        :attention-weights="result.attention_weights"
       />
 
       <div class="history-link">

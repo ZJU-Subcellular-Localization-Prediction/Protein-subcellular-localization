@@ -32,6 +32,9 @@ public class PredictService {
     @Value("${predict.python.timeout-seconds:60}")
     private int timeoutSeconds;
 
+    @Value("${predict.model.path:best_model.pt}")
+    private String modelPath;
+
     /**
      * Generate a short hash ID from the raw sequence (MD5 first 12 chars).
      */
@@ -89,10 +92,12 @@ public class PredictService {
         String absScript = scriptFile.getAbsolutePath();
 
         ProcessBuilder pb = new ProcessBuilder(
-                pythonPath, absScript, "--sequence", sequence
+                pythonPath, absScript, "--sequence", sequence, "--model-path", modelPath
         );
         pb.directory(scriptFile.getParentFile());
         pb.redirectErrorStream(false);
+        pb.environment().put("HF_HUB_OFFLINE", "1");
+        pb.environment().put("TRANSFORMERS_OFFLINE", "1");
 
         log.info("Running: {} {} --sequence <SEQ>", pythonPath, absScript);
 

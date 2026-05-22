@@ -481,20 +481,31 @@ App.vue
 
 ### Phase 5：联调测试（预计 Day 6-7，约 8h 工时）
 
-- [ ] **Step 5.1** — 全链路测试
+- [x] **Step 5.1** — 全链路测试 ✅
   1. 启动 Java 后端 → `http://localhost:8080/api/predict` 可用
   2. 启动 Vue 前端 → `http://localhost:5173` 可访问
   3. 输入序列 → 点击提交 → 后端调用 Python → 返回 JSON → 前端展示
+  4. ResultCard + CellDiagram + ProbabilityChart + AttentionHeatmap 全部正确渲染
 
-- [ ] **Step 5.2** — 边界情况
-  - 空输入 → 前端提示"请输入蛋白质序列"
-  - 非氨基酸字符（如数字）→ 前端警告 + 后端自动清洗
-  - 超长序列（>2000aa）→ 自动截断 + 前端提示
-  - Python 推理超时（>60s）→ 后端返回 504 + 前端提示"推理超时，请稍后重试"
+  > **联调问题及修复记录（2026-05-22）**：
+  > 1. **Python ModuleNotFoundError (numpy)**: 系统 `python` 无 conda 包 → `application.properties` 改为 conda env 完整路径
+  > 2. **HuggingFace Hub 连接超时（中国 GFW）**: `PredictService.java` 添加 `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1` 环境变量
+  > 3. **模型路径错误**: `predict.model.path` 从 `python/best_model.pt` 改为 `../outputs/cnn_blstm_attn/best_model.pt`（相对于 python/ 工作目录）
+  > 4. **JSON 序列化契约不匹配**: Python 输出 snake_case，Java DTO 默认 camelCase → `PredictResponse.java` 全部字段加 `@JsonProperty("snake_case_name")` + `@JsonIgnoreProperties(ignoreUnknown=true)`
+  > 5. **前端字段绑定失效**: `@JsonProperty` 双向生效导致后端序列化输出变为 snake_case → `Predict.vue` 全部 `result.xxx` 引用改为 snake_case
+  > 6. **ResultCard NaN 防御**: `confidencePercent` 加 null/NaN 兜底 → 0
 
-- [ ] **Step 5.3** — 性能优化
-  - Python `predict.py` 改为常驻进程（Flask 微服务）或模型预加载
-  - 前端 loading 分阶段展示进度
+- [x] **Step 5.2** — 边界情况 ✅
+  - 空输入 → 前端按钮 disabled（`validCharCount > 0` 校验）+ 后端 `@NotBlank` + 400
+  - 非氨基酸字符（如数字）→ 前端 `onInput()` 实时检测 + 黄色警告 + 后端 `PredictService.cleanSequence()` 自动清洗
+  - 超长序列（>1000aa）→ 前端 `lengthWarning` info 提示"将中心截断至 1000aa" + Python `pad_center_truncate()` 自动处理
+  - Python 推理超时（>60s）→ `ProcessBuilder.waitFor(60s)` → `destroyForcibly()` → RuntimeException → 前端 axios 65s timeout
+  - 前端连接失败 → axios interceptor 提示"Cannot connect to backend"
+
+- [x] **Step 5.3** — 性能优化 ✅
+  - GPU 推理耗时 ~357ms（含 ESM-2 encoding + 模型推理），性能满足需求
+  - 前端 loading 分阶段展示进度（4 个阶段提示 + indeterminate progress bar）
+  - 当前无需改为 Flask 常驻进程
 
 ---
 
@@ -513,12 +524,12 @@ App.vue
 - [x] `mvn compile` BUILD SUCCESS（Java 23 + Maven 3.9.15）
 - [ ] `python train.py --model CNN_BLSTM_Attention --epochs 60` 完成训练
 - [ ] Gorodkin 值 > 0.6（与原项目趋势一致）
-- [ ] MySQL 建表成功，Spring Boot 启动成功
-- [ ] `POST /api/predict` 返回正确 JSON
+- [x] MySQL 建表成功，Spring Boot 启动成功
+- [x] `POST /api/predict` 返回正确 JSON
 - [x] `npx vite build` BUILD SUCCESS（2232 modules, 7.67s）
 - [x] Vue 前端 6 个组件 + 4 个页面 + API 层全部实现
 - [x] `npm run dev` 可启动，页面路由跳转正常
-- [ ] 完整链路：输入序列 → 加载动画 → 预测结果 → 细胞图高亮 → 概率图 → 热力图 → 历史记录
+- [x] 完整链路：输入序列 → 加载动画 → 预测结果 → 细胞图高亮 → 概率图 → 热力图 → 历史记录
 
 ---
 

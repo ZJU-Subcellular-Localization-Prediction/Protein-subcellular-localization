@@ -1,17 +1,38 @@
 package com.proteinlocal.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Map;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class PredictResponse {
 
+    @JsonProperty("sequence_id")
     private String sequenceId;
+
+    @JsonProperty("predicted_location")
     private String predictedLocation;
+
+    @JsonProperty("location_confidence")
     private Double locationConfidence;
+
+    @JsonProperty("predicted_membrane")
     private String predictedMembrane;
+
+    @JsonProperty("membrane_confidence")
     private Double membraneConfidence;
+
+    @JsonProperty("all_probabilities")
     private Map<String, Double> allProbabilities;
+
+    @JsonProperty("attention_weights")
     private double[][] attentionWeights;
+
+    @JsonProperty("model_version")
     private String modelVersion;
+
+    @JsonProperty("inference_time_ms")
     private Integer inferenceTimeMs;
 
     public String getSequenceId() { return sequenceId; }
