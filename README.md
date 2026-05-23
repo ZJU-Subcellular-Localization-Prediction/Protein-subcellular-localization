@@ -97,6 +97,126 @@ Protein-subcellular-localization/
 
 ---
 
+## 数据集概况与预处理 (Dataset & Preprocessing)
+
+### 数据来源
+
+原始数据集为 **DeepLoc**（Almagro Armenteros et al., *Bioinformatics*, 2017），存储于 `DeepLoc.rtf`（RTF 封装的 FASTA 格式）。每条序列的 FASTA 头部承载三元组 metadata：
+
+```
+>UniProtID   Location-Membrane   [test]
+```
+
+| 字段 | 含义 | 示例 |
+|------|------|------|
+| `UniProtID` | 蛋白质唯一标识符 | `Q9H400`, `P63033` |
+| `Location` | 10 类亚细胞定位（点号分隔） | `Cell.membrane`, `Nucleus` |
+| `Membrane` | 膜结合状态标记 | `M` (膜蛋白), `S` (可溶性蛋白) |
+| `test` | 可选；存在 → 独立测试集，不存在 → 参与 4-fold 划分 | `test` |
+
+> **排斥类别**：`Cytoplasm-Nucleus`（混合定位，无明确归属）在解析阶段直接丢弃。
+
+### 总样本概况与划分机制
+
+| 统计项 | 数值 |
+|--------|------|
+| **总样本量** | **13,858** 条蛋白质序列 |
+| 序列长度范围 | 40 ~ >8000 AA |
+| 截断后最大长度 | **1000 AA**（中心截断） |
+| 特征提取模型 | ESM-2 (`esm2_t30_150M_UR50D`, 640 维) |
+| 特征存储策略 | 文件级独立存储（逐条 float16 `.pt`，总计 ~7.9 GB） |
+
+**4-fold 交叉验证划分逻辑**：
+
+非 test 样本按出现顺序循环分配 fold 编号（`(part-1) % 4 + 1`）：
+- **fold = 1** → 验证集 (Val)
+- **fold ∈ {2, 3, 4}** → 训练集 (Train)
+- FASTA 头部携带 `test` 标记 → **独立测试集** (Test)
+
+```text
+序列流：   seq₀  seq₁  seq₂  seq₃  seq₄  seq₅  seq₆  seq₇  ...
+            ↓      ↓      ↓      ↓      ↓      ↓      ↓      ↓
+fold:       1      2      3      4      1      2      3      4
+            ↓      ↓      ↓      ↓      ↓      ↓      ↓      ↓
+split:     Val   Train  Train  Train   Val   Train  Train  Train
+```
+
+| Split | 样本数 | 占比 | 划分策略 |
+|-------|--------|------|---------|
+| **Train** | 8,313 | 60.0% | fold ∈ {2, 3, 4}，循环赋值 |
+| **Val** | 2,772 | 20.0% | fold = 1，固定 |
+| **Test** | 2,773 | 20.0% | FASTA 头 `test` 标记，独立 |
+
+### 任务一：亚细胞定位（10 分类）
+
+| ID | 类别名称 | Train | Val | Test | 总样本 | 占比 |
+|----|---------|-------|-----|------|--------|------|
+| 0 | **Cell membrane** | 800 | 267 | 273 | 1,340 | 9.7% |
+| 1 | **Cytoplasm** | 1,525 | 509 | 508 | 2,542 | 18.3% |
+| 2 | **Endoplasmic reticulum** | 517 | 172 | 173 | 862 | 6.2% |
+| 3 | **Golgi apparatus** | 215 | 71 | 70 | 356 | 2.6% |
+| 4 | **Lysosome/Vacuole** | 192 | 65 | 64 | 321 | 2.3% |
+| 5 | **Mitochondrion** | 906 | 302 | 302 | 1,510 | 10.9% |
+| 6 | **Nucleus** | 2,427 | 808 | 808 | 4,043 | **29.1%** |
+| 7 | **Peroxisome** | 93 | 31 | 30 | 154 | **1.1%** |
+| 8 | **Plastid** | 453 | 152 | 152 | 757 | 5.4% |
+| 9 | **Extracellular** | 1,185 | 395 | 393 | 1,973 | 14.2% |
+
+> **类别不平衡警示**：Nucleus (29.1%) 与 Peroxisome (1.1%) 样本量差距达 **26 倍**。训练时必须使用加权损失函数或 `class_weights` 补偿，否则罕见类别将被模型忽略。
+
+### 任务二：膜结合状态（实际 2 分类）
+
+原项目标签字典定义三类（`M`=0, `S`=1, `U`=2），但全量 13,858 条数据中 **无一条 `U`（Unknown）样本**，实际任务退化为二分类：
+
+| ID | 类别名称 | Train | Val | Test | 总样本 | 占比 |
+|----|---------|-------|-----|------|--------|------|
+| 0 | **M** (Membrane protein) | 5,240 | 1,742 | 1,767 | 8,749 | 63.1% |
+| 1 | **S** (Soluble protein) | 3,073 | 1,030 | 1,006 | 5,109 | 36.9% |
+
+> 膜蛋白与可溶性蛋白比例约 **1.7:1**，中度不平衡，建议训练时设置 `pos_weight` 或类别权重。
+
+### 序列预处理策略
+
+#### 1. 中心截断 (Center Truncation)
+
+当序列长度 > 1000 AA 时，从序列**中心**切除多余氨基酸，保留 N 端和 C 端：
+
+```text
+令 L = 原始序列长度, T = 目标长度 (1000), extra = L - T
+
+if extra ≥ 0:        # 长序列 → 中心截断
+    idx_i = ⌊L/2⌋ - ⌊extra/2⌋
+    idx_f = ⌊L/2⌋ + ⌈extra/2⌉
+    保留: seq[0:idx_i] + seq[idx_f:L]
+
+else:                 # 短序列 → 末端零填充
+    padding = -extra  # 在 DataLoader 阶段补零
+```
+
+**生物学依据**：蛋白质的功能信号区域分布在两端——N 端的**信号肽**（引导蛋白质定位）和 C 端的**定位信号**（如 KDEL 内质网驻留信号、SKL 过氧化物酶体靶向信号）。两端裁剪会破坏这些关键信号，中心区域多为结构域 loop 区，切除信息损失最小。
+
+#### 2. 特征提取与存储
+
+```
+ESM-2 (150M params, 640-dim)
+    │  tokenizer(seq, return_tensors="pt")
+    │  model(**inputs).last_hidden_state[:, 1:-1, :]
+    │  去除 BOS/EOS token 位置
+    ▼
+(seq_len_raw, 640) float16 → 逐条存盘 data/features/{split}/XXXXX.pt
+    │
+    ├── train/00000.pt ... 00012.pt  (8,313 files, ~5 GB)
+    ├── val/00000.pt   ... 02771.pt  (2,772 files, ~1.5 GB)
+    ├── test/00000.pt  ... 02772.pt  (2,773 files, ~1.5 GB)
+    └── manifest.pt  ← 标签索引 + 文件映射 + 元信息 (~700 KB)
+```
+
+#### 3. 训练时动态加载
+
+`ProteinDataset.__getitem__()` 按需从磁盘加载单条 `.pt` 文件，延迟到 `DataLoader` 阶段做零填充至固定形状 `(1000, 640)`，避免内存中同时驻留全量特征（~35 GB 全量 vs. ~2.5 MB 单条）。
+
+---
+
 ## 快速开始
 
 ### 1. 环境准备
