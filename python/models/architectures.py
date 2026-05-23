@@ -178,21 +178,24 @@ class BLSTM_Attention(nn.Module):
 
 class CNN_BLSTM_Attention(nn.Module):
     """
-    CNN → BiLSTM(return_sequences=True) → Attention → Dense → Dropout → 2×Dense
-    """
+    CNN → BiLSTM(return_sequences=True) → LayerNorm → Attention → Dense → Dropout → 2×Dense
 
+    P1 增强：BiLSTM 输出后增加 LayerNorm，沿特征维度归一化以稳定 Attention score 分布。
+    """
     def __init__(self, seq_len, n_feat, n_hid, n_class, drop_prob, n_filt, n_membrane_class=3):
         super().__init__()
+        hidden_dim = n_hid * 2
         self.conv_a = nn.Conv1d(n_feat, n_filt, 3, padding=1)
         self.conv_b = nn.Conv1d(n_feat, n_filt, 5, padding=2)
         self.conv_final = nn.Conv1d(n_filt * 2, n_filt * 2, 3, padding=1)
         self.drop_in = nn.Dropout(drop_prob)
         self.lstm = nn.LSTM(n_filt * 2, n_hid, batch_first=True, bidirectional=True)
-        self.attention = BahdanauAttention(n_hid * 2)
-        self.dense = nn.Linear(n_hid * 2, n_hid * 2)
+        self.layernorm = nn.LayerNorm(hidden_dim)     # P1: 稳定 Attention 输入分布
+        self.attention = BahdanauAttention(hidden_dim)
+        self.dense = nn.Linear(hidden_dim, hidden_dim)
         self.dropout = nn.Dropout(drop_prob)
-        self.out_location = nn.Linear(n_hid * 2, n_class)
-        self.out_membrane = nn.Linear(n_hid * 2, n_membrane_class)
+        self.out_location = nn.Linear(hidden_dim, n_class)
+        self.out_membrane = nn.Linear(hidden_dim, n_membrane_class)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)                      # (batch, n_feat, seq_len)
@@ -203,7 +206,9 @@ class CNN_BLSTM_Attention(nn.Module):
         x = x.permute(0, 2, 1)                       # (batch, seq_len, 2*n_filt)
         x = self.drop_in(x)
         l_lstm, (h_n, _) = self.lstm(x)
+        l_lstm = self.layernorm(l_lstm)               # P1: (batch, seq_len, 2*n_hid)
         state_h = torch.cat([h_n[0], h_n[1]], dim=1)  # (batch, 2*n_hid)
+        state_h = self.layernorm(state_h)              # P1: 归一化 decoder hidden
         context, _ = self.attention(l_lstm, state_h)   # (batch, 2*n_hid)
         context = F.relu(self.dense(context))
         context = self.dropout(context)

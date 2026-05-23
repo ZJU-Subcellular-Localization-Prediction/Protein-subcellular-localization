@@ -1,9 +1,15 @@
 """
 训练脚本 — 7 种对比架构的训练 + 评估
 
+优化特性 (Step 2.6):
+  - Location 逆频率加权 CrossEntropyLoss（26x 类别不平衡反制）
+  - Adam L2 正则化 (weight_decay=1e-4)
+  - ReduceLROnPlateau 动态学习率调度
+  - 双任务 Loss 解耦 (loss = loc_loss + mem_weight * mem_loss)
+
 用法:
     python train.py --model FFN --epochs 60
-    python train.py --model CNN_BLSTM_Attention --epochs 120 --lr 0.0005
+    python train.py --model CNN_BLSTM_Attention --epochs 60 --use_class_weights --mem_weight 0.5
     python train.py --model Complete --epochs 120 --batch_size 64
 """
 
@@ -48,12 +54,24 @@ def parse_args():
     p.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     p.add_argument("--n_hid", type=int, default=64, help="Hidden units for LSTM/Dense")
     p.add_argument("--n_filt", type=int, default=32, help="Conv1d filters")
-    p.add_argument("--drop_prob", type=float, default=0.3, help="Dropout probability")
+    p.add_argument("--drop_prob", type=float, default=0.5, help="Dropout probability")
     p.add_argument("--drop_hid", type=float, default=0.3, help="Dropout for hidden layers (Complete only)")
     p.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
     p.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     p.add_argument("--output", default="./", help="Output directory for checkpoints and plots")
     p.add_argument("--no_eval", action="store_true", help="Skip final evaluation on test set")
+    # 训练优化参数 (Step 2.6)
+    p.add_argument("--weight_decay", type=float, default=1e-4, help="L2 regularization coefficient for Adam")
+    p.add_argument("--mem_weight", type=float, default=0.5, help="Membrane loss weight relative to location")
+    p.add_argument("--lr_patience", type=int, default=4, help="ReduceLROnPlateau patience (epochs)")
+    p.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
+    p.add_argument("--use_class_weights", action="store_true", default=True,
+                   help="Use inverse-frequency class weights for Location loss")
+    p.add_argument("--no_class_weights", action="store_true", default=False,
+                   help="Disable class weights (overrides --use_class_weights)")
+    p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    p.add_argument("--monitor", default="val_acc", choices=["val_acc", "val_loss"],
+                   help="Metric for early stopping / checkpoint / LR scheduler (default: val_acc)")
     return p.parse_args()
 
 
@@ -63,10 +81,13 @@ def compute_accuracy(logits, targets):
 
 
 @torch.no_grad()
-def validate(model, loader, crit, is_dual, device):
-    """返回 dict: {total_loss, loc_loss, mem_loss, loc_acc, mem_acc}"""
+def validate(model, loader, crit_loc_weighted, crit_loc_unweighted, crit_mem,
+             is_dual, device, mem_weight=0.5):
+    """返回 dict: {total_loss_weighted, total_loss_unweighted, loc_loss_weighted,
+                    loc_loss_unweighted, mem_loss, loc_acc, mem_acc}"""
     model.eval()
-    total_loss_sum, loc_loss_sum, mem_loss_sum = 0.0, 0.0, 0.0
+    total_w_sum, total_uw_sum = 0.0, 0.0
+    loc_w_sum, loc_uw_sum, mem_sum = 0.0, 0.0, 0.0
     loc_correct, mem_correct, n_samples = 0, 0, 0
 
     for X, y_loc, y_mem in loader:
@@ -76,29 +97,38 @@ def validate(model, loader, crit, is_dual, device):
         out = model(X)
         if is_dual:
             loc_logits, mem_logits = out
-            loc_l = crit(loc_logits, y_loc).item()
-            mem_l = crit(mem_logits, y_mem).item()
-            loc_loss_sum += loc_l * X.size(0)
-            mem_loss_sum += mem_l * X.size(0)
-            total_loss_sum += (loc_l + mem_l) * X.size(0)
+            loc_w = crit_loc_weighted(loc_logits, y_loc).item()
+            loc_uw = crit_loc_unweighted(loc_logits, y_loc).item()
+            mem_l = crit_mem(mem_logits, y_mem).item()
+            loc_w_sum += loc_w * X.size(0)
+            loc_uw_sum += loc_uw * X.size(0)
+            mem_sum += mem_l * X.size(0)
+            total_w_sum += (loc_w + mem_weight * mem_l) * X.size(0)
+            total_uw_sum += (loc_uw + mem_weight * mem_l) * X.size(0)
             loc_correct += (torch.argmax(loc_logits, dim=1) == y_loc).sum().item()
             mem_correct += (torch.argmax(mem_logits, dim=1) == y_mem).sum().item()
         else:
-            loc_l = crit(out, y_loc).item()
-            loc_loss_sum += loc_l * X.size(0)
-            total_loss_sum += loc_l * X.size(0)
-            loc_correct += (torch.argmax(out, dim=1) == y_loc).sum().item()
+            loc_logits = out
+            loc_w = crit_loc_weighted(loc_logits, y_loc).item()
+            loc_uw = crit_loc_unweighted(loc_logits, y_loc).item()
+            loc_w_sum += loc_w * X.size(0)
+            loc_uw_sum += loc_uw * X.size(0)
+            total_w_sum += loc_w * X.size(0)
+            total_uw_sum += loc_uw * X.size(0)
+            loc_correct += (torch.argmax(loc_logits, dim=1) == y_loc).sum().item()
 
         n_samples += X.size(0)
 
     n = n_samples
     result = {
-        "total_loss": total_loss_sum / n,
-        "loc_loss": loc_loss_sum / n,
+        "total_loss_weighted": total_w_sum / n,
+        "total_loss_unweighted": total_uw_sum / n,
+        "loc_loss_weighted": loc_w_sum / n,
+        "loc_loss_unweighted": loc_uw_sum / n,
         "loc_acc": loc_correct / n,
     }
     if is_dual:
-        result["mem_loss"] = mem_loss_sum / n
+        result["mem_loss"] = mem_sum / n
         result["mem_acc"] = mem_correct / n
     return result
 
@@ -173,15 +203,18 @@ def plot_confusion_matrix(cm, classes, title, save_path):
 
 
 def plot_curves(history, save_path):
-    """绘制 loss/acc 曲线并保存"""
+    """绘制 loss/acc 曲线并保存（P0: 同时显示 weighted 和 unweighted val_loss）"""
     epochs = range(1, len(history["train_loss"]) + 1)
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # Loss
-    axes[0, 0].plot(epochs, history["train_loss"], label="Train")
-    axes[0, 0].plot(epochs, history["val_loss"], label="Val")
+    # Loss (weighted + unweighted)
+    axes[0, 0].plot(epochs, history["train_loss"], label="Train (weighted)")
+    if "val_loss_weighted" in history:
+        axes[0, 0].plot(epochs, history["val_loss_weighted"], label="Val (weighted)", alpha=0.7)
+    if "val_loss_unweighted" in history:
+        axes[0, 0].plot(epochs, history["val_loss_unweighted"], label="Val (unweighted)", alpha=0.7)
     axes[0, 0].set_xlabel("Epoch"); axes[0, 0].set_ylabel("Loss")
-    axes[0, 0].set_title("Total Loss"); axes[0, 0].legend()
+    axes[0, 0].set_title("Total Loss (weighted + unweighted)"); axes[0, 0].legend()
 
     # Location accuracy
     axes[0, 1].plot(epochs, history["train_loc_acc"], label="Train")
@@ -213,14 +246,16 @@ def plot_curves(history, save_path):
 def print_measures(model_name, history, best_epoch, loc_mcc, mem_mcc):
     """仿照原项目 models.py 第 626-642 行的 print_measures"""
     idx = best_epoch - 1  # 0-indexed
-    val_loss = history["val_loss"][idx]
+    val_loss_w = history["val_loss_weighted"][idx]
+    val_loss_uw = history["val_loss_unweighted"][idx]
     val_loc_acc = history["val_loc_acc"][idx]
 
     print(f"\n{'='*60}")
     print(f"Best values for Network {model_name}")
     print(f"{'='*60}")
     print(f"Best epoch: {best_epoch}")
-    print(f"Minimum validation loss: {val_loss:.6f}")
+    print(f"Validation loss (weighted):   {val_loss_w:.6f}")
+    print(f"Validation loss (unweighted): {val_loss_uw:.6f}")
     print(f"Validation accuracy (location): {val_loc_acc:.6f}")
 
     if "val_mem_acc" in history and history["val_mem_acc"][idx] >= 0:
@@ -239,6 +274,13 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    # ---- 固定随机种子 ----
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    print(f"Random seed: {args.seed}")
 
     # ---- 判断是否双输出 -----
     model_name_lower = args.model.lower().replace("-", "_").replace(" ", "_")
@@ -262,17 +304,51 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {args.model} | Dual output: {is_dual} | Trainable params: {n_params:,}")
 
-    # ---- 优化器 + 损失函数 ----
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss()
+    # ---- 类别权重（Location 逆频率加权） ----
+    train_counts = np.array([800, 1525, 517, 215, 192, 906, 2427, 93, 453, 1185])
+    total = train_counts.sum()
+    n_class = 10
+    loc_weights_raw = total / (n_class * train_counts)
+    # [1.04, 0.55, 1.61, 3.87, 4.33, 0.92, 0.34, 8.94, 1.84, 0.70]
+
+    use_class_weights = args.use_class_weights and not args.no_class_weights
+    if use_class_weights:
+        loc_weights_tensor = torch.FloatTensor(loc_weights_raw).to(device)
+        criterion_loc = nn.CrossEntropyLoss(weight=loc_weights_tensor)
+        print(f"Location class weights (inverse frequency): {loc_weights_raw}")
+    else:
+        criterion_loc = nn.CrossEntropyLoss()
+        print("Location class weights: DISABLED (using uniform)")
+
+    criterion_mem = nn.CrossEntropyLoss()  # M:S=1.7:1, healthy distribution
+    print(f"Membrane loss: unweighted CrossEntropyLoss (M:S=1.7:1 is healthy)")
+
+    # P0: 无加权 Loss 专用于验证监控（不被类别权重扭曲）
+    criterion_loc_unweighted = nn.CrossEntropyLoss()
+    print("Validation monitor: unweighted CrossEntropyLoss for val_loss_raw")
+
+    # ---- 优化器（含 L2 正则化） ----
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
+                                 weight_decay=args.weight_decay)
+    print(f"Optimizer: Adam(lr={args.lr}, weight_decay={args.weight_decay})")
+
+    # ---- 学习率调度器 ----
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=args.lr_factor,
+        patience=args.lr_patience, min_lr=1e-6, verbose=True
+    )
+    print(f"LR scheduler: ReduceLROnPlateau(patience={args.lr_patience}, "
+          f"factor={args.lr_factor}, min_lr=1e-6)")
+    print(f"Dual-task loss: loss = loc_loss + {args.mem_weight} * mem_loss")
+    print(f"Monitor metric: {args.monitor} (used for early stopping + LR scheduler + checkpoint)")
 
     # ---- 训练状态 ----
     os.makedirs(args.output, exist_ok=True)
-    best_val_loss = float("inf")
+    best_metric = float("-inf") if args.monitor == "val_acc" else float("inf")
     best_epoch = 0
     patience_counter = 0
     history = {
-        "train_loss": [], "val_loss": [],
+        "train_loss": [], "val_loss_weighted": [], "val_loss_unweighted": [],
         "train_loc_acc": [], "val_loc_acc": [],
     }
     if is_dual:
@@ -298,9 +374,9 @@ def main():
 
             if is_dual:
                 loc_logits, mem_logits = out
-                loc_loss = criterion(loc_logits, y_loc)
-                mem_loss = criterion(mem_logits, y_mem)
-                loss = loc_loss + mem_loss
+                loc_loss = criterion_loc(loc_logits, y_loc)
+                mem_loss = criterion_mem(mem_logits, y_mem)
+                loss = loc_loss + args.mem_weight * mem_loss
 
                 train_loc_loss_sum += loc_loss.item() * X.size(0)
                 train_mem_loss_sum += mem_loss.item() * X.size(0)
@@ -308,7 +384,7 @@ def main():
                 train_mem_correct += (torch.argmax(mem_logits, dim=1) == y_mem).sum().item()
             else:
                 loc_logits = out  # Complete 模型只输出 location
-                loss = criterion(loc_logits, y_loc)
+                loss = criterion_loc(loc_logits, y_loc)
                 train_loc_loss_sum += loss.item() * X.size(0)
                 train_loc_correct += (torch.argmax(loc_logits, dim=1) == y_loc).sum().item()
 
@@ -321,20 +397,33 @@ def main():
             n_batches += 1
 
         # ---- 验证阶段 ----
-        val = validate(model, val_loader, criterion, is_dual, device)
-        val_loss = val["total_loss"]
+        val = validate(model, val_loader, criterion_loc, criterion_loc_unweighted,
+                       criterion_mem, is_dual, device, mem_weight=args.mem_weight)
+        val_loss_weighted = val["total_loss_weighted"]
+        val_loss_unweighted = val["total_loss_unweighted"]
+
+        # ---- 选择监控指标 ----
+        if args.monitor == "val_acc":
+            monitor_value = val["loc_acc"]
+            is_better = monitor_value > best_metric
+        else:
+            monitor_value = val_loss_unweighted
+            is_better = monitor_value < best_metric
 
         # ---- 记录 ----
         epoch_train_loss = train_loss_sum / n_samples
         epoch_train_loc_acc = train_loc_correct / n_samples
 
         history["train_loss"].append(epoch_train_loss)
-        history["val_loss"].append(val_loss)
+        history["val_loss_weighted"].append(val_loss_weighted)
+        history["val_loss_unweighted"].append(val_loss_unweighted)
         history["train_loc_acc"].append(epoch_train_loc_acc)
         history["val_loc_acc"].append(val["loc_acc"])
 
         log = (f"Epoch {epoch:3d}/{args.epochs} | "
-               f"T loss: {epoch_train_loss:.4f} | V loss: {val_loss:.4f} | "
+               f"LR: {optimizer.param_groups[0]['lr']:.1e} | "
+               f"T loss: {epoch_train_loss:.4f} | "
+               f"V loss(w): {val_loss_weighted:.4f} | V loss(uw): {val_loss_unweighted:.4f} | "
                f"T loc acc: {epoch_train_loc_acc:.4f} | V loc acc: {val['loc_acc']:.4f}")
 
         if is_dual:
@@ -347,15 +436,22 @@ def main():
 
         print(log)
 
+        # ---- 学习率调度（P0: 使用选定的监控指标） ----
+        if args.monitor == "val_acc":
+            scheduler.step(-monitor_value)  # ReduceLROnPlateau mode='min', 传入负值使"越大越好"变为"越小越好"
+        else:
+            scheduler.step(monitor_value)
+
         # ---- Early Stopping + Checkpoint ----
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if is_better:
+            best_metric = monitor_value
             best_epoch = epoch
             patience_counter = 0
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
                 "val_metrics": val,
                 "args": vars(args),
                 "history": history,
@@ -368,7 +464,9 @@ def main():
                 break
 
     train_time = time.time() - t_start
-    print(f"\nTraining finished in {train_time/60:.1f} min. Best epoch: {best_epoch} (val_loss={best_val_loss:.4f})")
+    metric_name = "val_acc" if args.monitor == "val_acc" else "val_loss_unweighted"
+    print(f"\nTraining finished in {train_time/60:.1f} min. "
+          f"Best epoch: {best_epoch} ({metric_name}={best_metric:.4f})")
 
     # ---- 保存训练曲线 ----
     plot_curves(history, os.path.join(args.output, "training_curves.png"))

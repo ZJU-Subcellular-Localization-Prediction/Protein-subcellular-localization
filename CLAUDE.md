@@ -517,7 +517,42 @@ App.vue
   - `print_measures()`：仿照原项目输出最佳 epoch 全部指标
   - 评估阶段由 `--no_eval` 控制，默认在训练结束后自动在测试集上运行
 
-> ⚠️ **训练状态备注（2026-05-22）**：FFN 2 epoch 冒烟测试 loss 下降正常，但当前超参数下准确率较低（loc≈66%, mem≈76%）。正式训练需进行超参数调优（lr、n_filt、n_hid、drop_prob 网格搜索），参见下方超参数搜索空间。调优将在 Phase 5 联调完成后专门进行。
+- [x] **Step 2.6** — 训练优化（反过拟合 + 类别不平衡 + 双任务解耦）✅
+  - Location 逆频率加权 CrossEntropyLoss（Peroxisome ×8.94, Nucleus ×0.34）
+  - Membrane 普通 CrossEntropyLoss（M:S=1.7:1 健康，无需加权）
+  - Adam L2 正则化 `weight_decay=1e-4`
+  - ReduceLROnPlateau（patience=4, factor=0.5, min_lr=1e-6）
+  - 双任务 Loss 解耦 `loss = loc_loss + 0.5 * mem_loss`
+  - 新增 CLI：`--weight_decay`, `--mem_weight`, `--lr_patience`, `--lr_factor`, `--use_class_weights`, `--seed`
+  - 固定随机种子 `--seed 42`（可复现性）
+
+> **训练优化说明（2026-05-23）**：CNN_BLSTM_Attention 初始训练（Epoch 1-11）出现严重过拟合——train loss 降至 0.71 但 val loss 在 Epoch 6 达最低 1.06 后反弹至 1.12+。根因：(1) Location 26 倍类别不平衡导致 CrossEntropyLoss 梯度被 Nucleus 淹没；(2) ESM-2 640 维特征极其丰富，下游轻量网络极易死记；(3) 双任务等权相加，Membrane 二分类收敛远快于 Location 十分类，主导早期梯度方向；(4) 无 L2 正则化 + 无 LR 调度，模型无泛化约束。本次优化引入 4 项反制措施，预期 val_loss 可持续下降至 60 epoch 不发生回升。
+
+- [x] **Step 2.7** — P0+P1 验证解耦 + 正则化增强 ✅
+
+  **P0：验证监控与训练损失解耦**
+  - **理论根因**：Step 2.6 中 Early Stopping / ReduceLROnPlateau / Best Checkpoint 三者均监控使用加权 CE 计算的 `val_loss`。加权 CE 中 Peroxisome ×8.94、Golgi ×3.87——当模型开始"勇敢"预测小类时，少数高权重样本的边界错误被 8-26× 放大，淹没了整体的 accuracy 改善信号。
+  - **证据**：Epoch 10 val_loss=1.106 (val_acc=0.759, MCC=0.679)；Epoch 24 val_loss=1.767 (val_acc=0.808, MCC 未测)。模型在 Epoch 10-24 期间 accuracy 提升 +5pp，但加权 val_loss 上升了 60%，导致 Epoch 24 的更强模型被静默丢弃。
+  - **修复**：
+    - 新增 `criterion_loc_unweighted = nn.CrossEntropyLoss()` 专用于验证阶段的 loss 计算
+    - `validate()` 返回 unweighted `loc_loss_raw` 和 weighted `loc_loss_weighted` 两个指标
+    - Early Stopping + ReduceLROnPlateau + Checkpoint 全部改为监控 `val_loc_acc`（直接优化目标指标）
+    - 新增 `--monitor` CLI 参数（默认 `val_acc`，可选 `val_loss` 回退）
+    - 训练日志同步输出 weighted 和 unweighted 两种 val_loss，便于对比诊断
+
+  **P1：正则化增强**
+  - **根因**：train_loc_acc 达 0.97 而 val_loc_acc 仅 0.81，16pp 的 train/val gap 说明严重过拟合。当前仅 `drop_prob=0.3` + `weight_decay=1e-4` 不足以约束 293K 参数模型对 640 维 ESM-2 特征的死记。
+  - **修复**：
+    - `drop_prob` 默认值 0.3 → 0.5（原项目超参数搜索空间上限为 0.7）
+    - `CNN_BLSTM_Attention` 架构 BiLSTM 输出后、Attention 输入前增加 `nn.LayerNorm(n_hid*2)`
+    - LayerNorm 沿特征维度归一化，稳定 Attention score 的数值分布，削弱单个高激活神经元对 context vector 的绑架效应
+
+  **预期收益**：
+  | 指标 | 优化前 | P0 后 | P0+P1 后 |
+  |------|--------|-------|----------|
+  | Best val_loc_acc | 0.759 (E10) | 0.808 (E24) | 0.81+ |
+  | Test Gorodkin | 0.679 | 0.70+ | 0.72+ |
+  | Train/Val acc gap | 16pp | ~12pp | ~8pp |
 
 > **阻塞点**：完整版 6 并行 Conv 层参数量 + GPU 显存管理。建议先用 `esm2_t12_35M`（480 维）快速跑通，再换 `esm2_t30_150M`（640 维）做最终训练。
 
@@ -673,7 +708,7 @@ App.vue
 - [x] Spring Boot 项目结构完整（18 个 Java 文件 + pom.xml + init.sql）
 - [x] `python test_predict_quick.py` 全部 7 项测试通过
 - [x] `mvn compile` BUILD SUCCESS（Java 23 + Maven 3.9.15）
-- [ ] `python train.py --model CNN_BLSTM_Attention --epochs 60` 完成训练
+- [ ] `python train.py --model CNN_BLSTM_Attention --epochs 60 --use_class_weights --weight_decay 1e-4 --mem_weight 0.5 --drop_prob 0.5 --monitor val_acc --seed 42` 完成训练，val_acc 用于模型选择，Gorodkin > 0.70
 - [ ] Gorodkin 值 > 0.6（与原项目趋势一致）
 - [x] MySQL 建表成功，Spring Boot 启动成功
 - [x] `POST /api/predict` 返回正确 JSON

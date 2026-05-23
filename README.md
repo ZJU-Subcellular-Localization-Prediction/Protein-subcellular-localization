@@ -89,11 +89,13 @@ Protein-subcellular-localization/
 | Phase 0 | 项目初始化 | ✅ 完成 |
 | Phase 1 | ESM-2 特征提取（13858 条序列，文件级存储） | ✅ 完成 |
 | Phase 2 | PyTorch 模型重写（7 种架构 + 训练/评估脚本） | ✅ 完成 |
+| Phase 2.6 | 模型训练优化（加权 Loss + L2 正则 + LR 调度 + 双任务解耦） | ✅ 完成 |
+| Phase 2.7 | P0+P1 验证解耦 + 正则化增强（unweighted val_acc 监控 + LayerNorm） | 🔄 进行中 |
 | Phase 3 | Java 后端 + MySQL（Spring Boot + MyBatis-Plus） | ✅ 完成 |
 | Phase 4 | Vue 3 前端（6 组件 + 4 页面 + ECharts + SVG） | ✅ 完成 |
 | Phase 5 | 联调测试（E2E 全链路 + 边界处理 + Code Review） | ✅ 完成 |
 
-> **剩余工作**：模型正式训练（60 epoch 超参数搜索）、Gorodkin 评估指标验证。
+> **剩余工作**：P0+P1 验证训练（val_acc 监控 + LayerNorm + drop_prob=0.5）、Gorodkin > 0.70 验证。
 
 ---
 
