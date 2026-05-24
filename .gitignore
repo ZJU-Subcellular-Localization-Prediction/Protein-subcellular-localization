@@ -22,11 +22,6 @@ python/data/features/test/
 .ipynb_checkpoints/
 *.ipynb
 
-# Matplotlib / training outputs (auto-generated)
-python/outputs/*/training_curves.png
-python/outputs/*/cm_location.png
-python/outputs/*/cm_membrane.png
-
 # ===== Java / Spring Boot / Maven =====
 target/
 !.mvn/wrapper/maven-wrapper.jar
