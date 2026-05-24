@@ -181,13 +181,24 @@ class CNN_BLSTM_Attention(nn.Module):
     CNN → BiLSTM(return_sequences=True) → LayerNorm → Attention → Dense → Dropout → 2×Dense
 
     P1 增强：BiLSTM 输出后增加 LayerNorm，沿特征维度归一化以稳定 Attention score 分布。
+    v3.0 增强：640→256 线性瓶颈层 + 同方差不确定性多任务权重 (log_var_loc, log_var_mem)。
     """
-    def __init__(self, seq_len, n_feat, n_hid, n_class, drop_prob, n_filt, n_membrane_class=3):
+    def __init__(self, seq_len, n_feat, n_hid, n_class, drop_prob, n_filt,
+                 bottleneck_dim=256, n_membrane_class=3):
         super().__init__()
         hidden_dim = n_hid * 2
-        self.conv_a = nn.Conv1d(n_feat, n_filt, 3, padding=1)
-        self.conv_b = nn.Conv1d(n_feat, n_filt, 5, padding=2)
+
+        # ---- v3.0: 信息瓶颈 — 640→256 可学习压缩 ----
+        self.input_proj = nn.Sequential(
+            nn.Linear(n_feat, bottleneck_dim),
+            nn.ReLU(),
+            nn.Dropout(drop_prob)
+        )
+        # Conv 层输入通道从 n_feat(640) 改为 bottleneck_dim(256)
+        self.conv_a = nn.Conv1d(bottleneck_dim, n_filt, 3, padding=1)
+        self.conv_b = nn.Conv1d(bottleneck_dim, n_filt, 5, padding=2)
         self.conv_final = nn.Conv1d(n_filt * 2, n_filt * 2, 3, padding=1)
+
         self.drop_in = nn.Dropout(drop_prob)
         self.lstm = nn.LSTM(n_filt * 2, n_hid, batch_first=True, bidirectional=True)
         self.layernorm = nn.LayerNorm(hidden_dim)     # P1: 稳定 Attention 输入分布
@@ -197,8 +208,16 @@ class CNN_BLSTM_Attention(nn.Module):
         self.out_location = nn.Linear(hidden_dim, n_class)
         self.out_membrane = nn.Linear(hidden_dim, n_membrane_class)
 
+        # ---- v3.0: 同方差不确定性多任务权重 ----
+        # log_var_loc = log(σ²_loc), log_var_mem = log(σ²_mem)
+        # 初始 σ=1.0 → log_var=0.0，即初始双任务等权
+        self.log_var_loc = nn.Parameter(torch.zeros(1))
+        self.log_var_mem = nn.Parameter(torch.zeros(1))
+
     def forward(self, x):
-        x = x.permute(0, 2, 1)                      # (batch, n_feat, seq_len)
+        # x: (batch, seq_len, n_feat)
+        x = self.input_proj(x)                        # v3.0: (batch, seq_len, 256)
+        x = x.permute(0, 2, 1)                        # (batch, 256, seq_len)
         a = F.relu(self.conv_a(x))
         b = F.relu(self.conv_b(x))
         x = torch.cat([a, b], dim=1)                 # (batch, 2*n_filt, seq_len)
@@ -311,7 +330,8 @@ class CNN_BLSTM_Attention_Complete(nn.Module):
 # ====== 工厂函数 ======
 
 def create_model(name, seq_len=1000, n_feat=640, n_hid=64, n_class=10,
-                 drop_prob=0.3, n_filt=32, drop_hid=0.3, n_membrane_class=3):
+                 drop_prob=0.3, n_filt=32, drop_hid=0.3, bottleneck_dim=256,
+                 n_membrane_class=3):
     """根据名称创建模型，统一参数接口"""
     name_lower = name.lower().replace('-', '_').replace(' ', '_')
     if name_lower == 'ffn':
@@ -325,7 +345,8 @@ def create_model(name, seq_len=1000, n_feat=640, n_hid=64, n_class=10,
     elif name_lower == 'blstm_attention' or name_lower == 'lstm_attention':
         return BLSTM_Attention(seq_len, n_feat, n_hid, n_class, drop_prob, n_membrane_class)
     elif name_lower == 'cnn_blstm_attention' or name_lower == 'cnn_lstm_attention':
-        return CNN_BLSTM_Attention(seq_len, n_feat, n_hid, n_class, drop_prob, n_filt, n_membrane_class)
+        return CNN_BLSTM_Attention(seq_len, n_feat, n_hid, n_class, drop_prob, n_filt,
+                                   bottleneck_dim, n_membrane_class)
     elif name_lower == 'complete' or name_lower == 'cnn_blstm_attention_complete':
         return CNN_BLSTM_Attention_Complete(seq_len, n_feat, n_hid, n_class, drop_prob, drop_hid, n_filt)
     else:

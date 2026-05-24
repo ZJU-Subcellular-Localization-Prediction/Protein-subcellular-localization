@@ -14,7 +14,6 @@ import json
 import time
 import argparse
 import warnings
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -109,6 +108,7 @@ class Predictor:
             drop_prob=self.args.get("drop_prob", 0.3),
             n_filt=self.args.get("n_filt", 32),
             drop_hid=self.args.get("drop_hid", 0.3),
+            bottleneck_dim=self.args.get("bottleneck_dim", 256),
         ).to(self.device)
         self.model.load_state_dict(self.ckpt["model_state_dict"])
         self.model.eval()
@@ -163,7 +163,7 @@ class Predictor:
         out = self.model(embedding)
 
         # 4. 解析输出
-        result = {"model_version": "v1"}
+        result = {"model_version": "v3"}
 
         if self.is_dual:
             loc_logits, mem_logits = out

@@ -1,15 +1,18 @@
 """
 训练脚本 — 7 种对比架构的训练 + 评估
 
-优化特性 (Step 2.6):
-  - Location 逆频率加权 CrossEntropyLoss（26x 类别不平衡反制）
-  - Adam L2 正则化 (weight_decay=1e-4)
-  - ReduceLROnPlateau 动态学习率调度
-  - 双任务 Loss 解耦 (loss = loc_loss + mem_weight * mem_loss)
+优化特性 (v3.0 Step 2.8):
+  - Focal Loss (γ=2.0) + Label Smoothing (ε=0.1) + sqrt-smoothed class weights
+  - 同方差不确定性多任务加权 (Kendall et al., CVPR 2018)
+  - 640→256 信息瓶颈层 (Information Bottleneck)
+  - Adam L2 正则化 (weight_decay=5e-4)
+  - ReduceLROnPlateau / CosineAnnealingWarmRestarts 双调度器可选
+  - Early Stopping patience=10 (monitor val_acc)
 
 用法:
-    python train.py --model FFN --epochs 60
-    python train.py --model CNN_BLSTM_Attention --epochs 60 --use_class_weights --mem_weight 0.5
+    python train.py --model CNN_BLSTM_Attention --epochs 60
+    python train.py --model CNN_BLSTM_Attention --epochs 60 --use_uncertainty
+    python train.py --model CNN_BLSTM_Attention --epochs 60 --scheduler cosine
     python train.py --model Complete --epochs 120 --batch_size 64
 """
 
@@ -31,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from data.dataset import create_dataloaders
 from models.architectures import create_model
+from models.focal_loss import FocalLoss
 
 # ====== 标签映射（来自 CLAUDE.md） ======
 
@@ -57,11 +61,11 @@ def parse_args():
     p.add_argument("--drop_prob", type=float, default=0.5, help="Dropout probability")
     p.add_argument("--drop_hid", type=float, default=0.3, help="Dropout for hidden layers (Complete only)")
     p.add_argument("--num_workers", type=int, default=4, help="DataLoader workers")
-    p.add_argument("--patience", type=int, default=20, help="Early stopping patience")
+    p.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     p.add_argument("--output", default="./", help="Output directory for checkpoints and plots")
     p.add_argument("--no_eval", action="store_true", help="Skip final evaluation on test set")
     # 训练优化参数 (Step 2.6)
-    p.add_argument("--weight_decay", type=float, default=1e-4, help="L2 regularization coefficient for Adam")
+    p.add_argument("--weight_decay", type=float, default=5e-4, help="L2 regularization coefficient for Adam")
     p.add_argument("--mem_weight", type=float, default=0.5, help="Membrane loss weight relative to location")
     p.add_argument("--lr_patience", type=int, default=4, help="ReduceLROnPlateau patience (epochs)")
     p.add_argument("--lr_factor", type=float, default=0.5, help="ReduceLROnPlateau factor")
@@ -72,6 +76,18 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     p.add_argument("--monitor", default="val_acc", choices=["val_acc", "val_loss"],
                    help="Metric for early stopping / checkpoint / LR scheduler (default: val_acc)")
+    # 训练优化参数 (v3.0 Step 2.8)
+    p.add_argument("--gamma", type=float, default=2.0, help="Focal Loss focusing parameter γ")
+    p.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing factor for Focal Loss")
+    p.add_argument("--bottleneck_dim", type=int, default=256, help="Bottleneck projection dimension (640→bottleneck_dim)")
+    p.add_argument("--use_uncertainty", action="store_true", default=True,
+                   help="Use homoscedastic uncertainty for multi-task weighting")
+    p.add_argument("--no_uncertainty", action="store_true", default=False,
+                   help="Disable uncertainty weighting (fallback to fixed --mem_weight)")
+    p.add_argument("--scheduler", default="plateau", choices=["plateau", "cosine"],
+                   help="LR scheduler type (default: plateau)")
+    p.add_argument("--T_0", type=int, default=10, help="CosineAnnealingWarmRestarts: first restart epoch")
+    p.add_argument("--T_mult", type=int, default=2, help="CosineAnnealingWarmRestarts: period multiplier")
     return p.parse_args()
 
 
@@ -298,27 +314,42 @@ def main():
     model = create_model(
         args.model, seq_len=1000, n_feat=640,
         n_hid=args.n_hid, n_class=10, drop_prob=args.drop_prob,
-        n_filt=args.n_filt, drop_hid=args.drop_hid
+        n_filt=args.n_filt, drop_hid=args.drop_hid,
+        bottleneck_dim=args.bottleneck_dim
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {args.model} | Dual output: {is_dual} | Trainable params: {n_params:,}")
 
-    # ---- 类别权重（Location 逆频率加权） ----
+    # ---- 类别权重（Location sqrt-smoothed inverse frequency, v3.0） ----
     train_counts = np.array([800, 1525, 517, 215, 192, 906, 2427, 93, 453, 1185])
     total = train_counts.sum()
     n_class = 10
-    loc_weights_raw = total / (n_class * train_counts)
-    # [1.04, 0.55, 1.61, 3.87, 4.33, 0.92, 0.34, 8.94, 1.84, 0.70]
+    # v3.0: sqrt 压缩极差 26.3× → 5.1×
+    loc_weights_raw = np.sqrt(total / (n_class * train_counts))
+    # [1.019, 0.738, 1.268, 1.966, 2.081, 0.958, 0.585, 2.990, 1.355, 0.838]
 
     use_class_weights = args.use_class_weights and not args.no_class_weights
     if use_class_weights:
         loc_weights_tensor = torch.FloatTensor(loc_weights_raw).to(device)
-        criterion_loc = nn.CrossEntropyLoss(weight=loc_weights_tensor)
-        print(f"Location class weights (inverse frequency): {loc_weights_raw}")
+        print(f"Location class weights (sqrt-smoothed inverse freq): "
+              f"[{', '.join(f'{w:.3f}' for w in loc_weights_raw)}]")
+        print(f"  Max/Min ratio: {loc_weights_raw.max()/loc_weights_raw.min():.1f}x "
+              f"(cf. inverse freq {np.max(total/(n_class*train_counts))/np.min(total/(n_class*train_counts)):.1f}x)")
     else:
-        criterion_loc = nn.CrossEntropyLoss()
+        loc_weights_tensor = None
         print("Location class weights: DISABLED (using uniform)")
+
+    # v3.0: Focal Loss (γ=2.0, label_smoothing=0.1) 替代加权 CrossEntropyLoss
+    criterion_loc = FocalLoss(
+        weight=loc_weights_tensor,
+        gamma=args.gamma,
+        label_smoothing=args.label_smoothing,
+        reduction='mean'
+    )
+    print(f"Location loss: FocalLoss(gamma={args.gamma}, "
+          f"label_smoothing={args.label_smoothing}, "
+          f"class_weights={'sqrt-smoothed' if use_class_weights else 'none'})")
 
     criterion_mem = nn.CrossEntropyLoss()  # M:S=1.7:1, healthy distribution
     print(f"Membrane loss: unweighted CrossEntropyLoss (M:S=1.7:1 is healthy)")
@@ -333,14 +364,36 @@ def main():
     print(f"Optimizer: Adam(lr={args.lr}, weight_decay={args.weight_decay})")
 
     # ---- 学习率调度器 ----
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=args.lr_factor,
-        patience=args.lr_patience, min_lr=1e-6, verbose=True
-    )
-    print(f"LR scheduler: ReduceLROnPlateau(patience={args.lr_patience}, "
-          f"factor={args.lr_factor}, min_lr=1e-6)")
-    print(f"Dual-task loss: loss = loc_loss + {args.mem_weight} * mem_loss")
+    if args.scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=args.T_0, T_mult=args.T_mult, eta_min=1e-6
+        )
+        print(f"LR scheduler: CosineAnnealingWarmRestarts(T_0={args.T_0}, "
+              f"T_mult={args.T_mult}, eta_min=1e-6)")
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=args.lr_factor,
+            patience=args.lr_patience, min_lr=1e-6, verbose=True
+        )
+        print(f"LR scheduler: ReduceLROnPlateau(patience={args.lr_patience}, "
+              f"factor={args.lr_factor}, min_lr=1e-6)")
+
+    # ---- 不确定性多任务加权 (v3.0) ----
+    use_uncertainty = args.use_uncertainty and not args.no_uncertainty and is_dual
+    has_uncertainty_params = hasattr(model, 'log_var_loc')
+    if use_uncertainty and not has_uncertainty_params:
+        print("WARNING: --use_uncertainty set but model lacks log_var_loc/log_var_mem. "
+              "Falling back to fixed mem_weight.")
+        use_uncertainty = False
+
+    if use_uncertainty:
+        print(f"Dual-task loss: L = exp(-s_loc)*L_loc + 0.5*s_loc "
+              f"+ exp(-s_mem)*L_mem + 0.5*s_mem  (uncertainty weighted)")
+    else:
+        print(f"Dual-task loss: loss = loc_loss + {args.mem_weight} * mem_loss  (fixed weight)")
+
     print(f"Monitor metric: {args.monitor} (used for early stopping + LR scheduler + checkpoint)")
+    print(f"Bottleneck dim: {args.bottleneck_dim}")
 
     # ---- 训练状态 ----
     os.makedirs(args.output, exist_ok=True)
@@ -376,7 +429,15 @@ def main():
                 loc_logits, mem_logits = out
                 loc_loss = criterion_loc(loc_logits, y_loc)
                 mem_loss = criterion_mem(mem_logits, y_mem)
-                loss = loc_loss + args.mem_weight * mem_loss
+
+                # v3.0: 同方差不确定性多任务加权
+                if use_uncertainty:
+                    precision_loc = torch.exp(-model.log_var_loc)
+                    precision_mem = torch.exp(-model.log_var_mem)
+                    loss = (precision_loc * loc_loss + 0.5 * model.log_var_loc
+                          + precision_mem * mem_loss + 0.5 * model.log_var_mem)
+                else:
+                    loss = loc_loss + args.mem_weight * mem_loss
 
                 train_loc_loss_sum += loc_loss.item() * X.size(0)
                 train_mem_loss_sum += mem_loss.item() * X.size(0)
@@ -426,6 +487,12 @@ def main():
                f"V loss(w): {val_loss_weighted:.4f} | V loss(uw): {val_loss_unweighted:.4f} | "
                f"T loc acc: {epoch_train_loc_acc:.4f} | V loc acc: {val['loc_acc']:.4f}")
 
+        # v3.0: 记录不确定性参数（σ = exp(log_var / 2)）
+        if use_uncertainty:
+            sigma_loc = torch.exp(0.5 * model.log_var_loc).item()
+            sigma_mem = torch.exp(0.5 * model.log_var_mem).item()
+            log += f" | σ_loc: {sigma_loc:.3f} σ_mem: {sigma_mem:.3f}"
+
         if is_dual:
             epoch_train_mem_acc = train_mem_correct / n_samples
             history["train_mem_loss"].append(train_mem_loss_sum / n_samples)
@@ -436,9 +503,11 @@ def main():
 
         print(log)
 
-        # ---- 学习率调度（P0: 使用选定的监控指标） ----
-        if args.monitor == "val_acc":
-            scheduler.step(-monitor_value)  # ReduceLROnPlateau mode='min', 传入负值使"越大越好"变为"越小越好"
+        # ---- 学习率调度 ----
+        if args.scheduler == "cosine":
+            scheduler.step()  # CosineAnnealingWarmRestarts: per-epoch step
+        elif args.monitor == "val_acc":
+            scheduler.step(-monitor_value)  # ReduceLROnPlateau mode='min', negate for "larger is better"
         else:
             scheduler.step(monitor_value)
 
